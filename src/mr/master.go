@@ -1,26 +1,112 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
+import (
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+const unassigned string = "unassigned"
+const completed string = "completed"
+
+type Assigned struct {
+	WorkerId     string
+	AssignedTime time.Time
+}
+
+type Task struct {
+	Id      string
+	Type    string      // "map" or "reduce" TODO: enum
+	Content string      // for map: it's input file name; for reduce it's `R`
+	Status  interface{} // "unassigned/completed" or Assigned
+}
+
+func (task Task) isCompleted() bool {
+	s, ok := task.Status.(string)
+	if ok {
+		return s == completed
+	} else {
+		return false
+	}
+}
 
 type Master struct {
 	// Your definitions here.
+	MapTasks    map[string]*Task
+	ReduceTasks map[string]*Task
+}
 
+func updateStatus(m map[string]*Task) bool {
+	// return whether everything is completed
+	completed := true
+	now := time.Now()
+
+	for k, v := range m {
+		task := *v
+
+		completed = completed && task.isCompleted()
+		// check if an Assigned date is more than 10 seconds old,
+		fmt.Println("%s %T", v.Id, task.Status)
+		t, ok := v.Status.(Assigned)
+		if ok {
+			if now.Sub(t.AssignedTime).Seconds() > 10 {
+				fmt.Printf("Task %s is more than 10s old, assigned time %s\n", k, t.AssignedTime)
+				m[k] = &Task{task.Id, task.Type, task.Content, unassigned}
+			}
+		}
+	}
+
+	return completed
+
+}
+
+// map collection functions
+func find(m map[string]*Task, f func(Task) bool) (*Task, error) {
+	for _, v := range m {
+		task := *v
+		if f(task) {
+			return v, nil
+		}
+	}
+	return &Task{}, errors.New("No applicable task found")
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+func (m *Master) GetTask(args *GetTaskRequest, reply *GetTaskResponse) error {
+	workerId := args.WorkerId
+	fmt.Printf("Got GetTask request from worker %s\n", workerId)
+	now := time.Now()
+	f := func(task Task) bool {
+		s, ok := task.Status.(string)
+		return ok && s == unassigned
+	}
+	mapTask, err := find(m.MapTasks, f)
+	if err != nil {
+		reduceTask, err2 := find(m.ReduceTasks, f)
+		if err2 != nil {
+			return errors.New("no task available")
+		}
+
+		reply.TaskId = reduceTask.Id
+		reply.TaskType = "reduce"
+		reply.TaskContent = reduceTask.Content
+		(*reduceTask).Status = Assigned{workerId, now}
+		return nil
+	}
+	reply.TaskId = mapTask.Id
+	reply.TaskType = "map"
+	reply.TaskContent = mapTask.Content
+	(*mapTask).Status = Assigned{workerId, now}
 	return nil
+
 }
 
 //
@@ -44,7 +130,12 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	ret := false
+	// Done is called every second, so we can use this to check the task status and reassign
+	// go through every task in MapTasks and ReduceTasks
+
+	ret := updateStatus(m.MapTasks) && updateStatus(m.ReduceTasks)
+
+	fmt.Printf("Done checking result %b\n", ret)
 
 	// Your code here.
 
@@ -58,6 +149,21 @@ func (m *Master) Done() bool {
 //
 func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{}
+	// create map tasks
+	m.MapTasks = map[string]*Task{}
+	m.ReduceTasks = map[string]*Task{}
+
+	for _, fname := range files {
+		taskId := uuid.New().String()
+		m.MapTasks[taskId] = &Task{taskId, "map", fname, unassigned}
+	}
+
+	for i := 0; i < nReduce; i++ {
+		taskId := uuid.New().String()
+		m.ReduceTasks[taskId] = &Task{taskId, "reduce", string(i), unassigned}
+	}
+
+	fmt.Printf("Master initialized, map tasks total %d, reduce tasks total %d\n", len(m.MapTasks), len(m.ReduceTasks))
 
 	// Your code here.
 
