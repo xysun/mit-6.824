@@ -9,8 +9,6 @@ import (
 	"net/rpc"
 	"os"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 const unassigned string = "unassigned"
@@ -41,6 +39,7 @@ type Master struct {
 	// Your definitions here.
 	MapTasks    map[string]*Task
 	ReduceTasks map[string]*Task
+	nReduce     int
 }
 
 func updateStatus(m map[string]*Task) bool {
@@ -78,6 +77,14 @@ func find(m map[string]*Task, f func(Task) bool) (*Task, error) {
 	return &Task{}, errors.New("No applicable task found")
 }
 
+func all(m map[string]*Task, f func(Task) bool) bool {
+	result := true
+	for _, v := range m {
+		result = result && f(*v)
+	}
+	return result
+}
+
 // Your code here -- RPC handlers for the worker to call.
 
 func (m *Master) GetTask(args *GetTaskRequest, reply *GetTaskResponse) error {
@@ -90,20 +97,28 @@ func (m *Master) GetTask(args *GetTaskRequest, reply *GetTaskResponse) error {
 	}
 	mapTask, err := find(m.MapTasks, f)
 	if err != nil {
-		reduceTask, err2 := find(m.ReduceTasks, f)
-		if err2 != nil {
-			return errors.New("no task available")
+		// only proceed to reduce tasks if all map tasks are completed
+		if all(m.MapTasks, func(task Task) bool { return task.Status == completed }) {
+			reduceTask, err2 := find(m.ReduceTasks, f)
+			if err2 != nil {
+				return errors.New("no task available")
+			}
+
+			reply.TaskId = reduceTask.Id
+			reply.TaskType = "reduce"
+			reply.TaskContent = reduceTask.Content
+			reply.NReduce = m.nReduce
+			(*reduceTask).Status = Assigned{workerId, now}
+			return nil
+		} else {
+			return errors.New("Map tasks are not completed yet, cannot assign reduce tasks")
 		}
 
-		reply.TaskId = reduceTask.Id
-		reply.TaskType = "reduce"
-		reply.TaskContent = reduceTask.Content
-		(*reduceTask).Status = Assigned{workerId, now}
-		return nil
 	}
 	reply.TaskId = mapTask.Id
 	reply.TaskType = "map"
 	reply.TaskContent = mapTask.Content
+	reply.NReduce = m.nReduce
 	(*mapTask).Status = Assigned{workerId, now}
 	return nil
 
@@ -152,14 +167,15 @@ func MakeMaster(files []string, nReduce int) *Master {
 	// create map tasks
 	m.MapTasks = map[string]*Task{}
 	m.ReduceTasks = map[string]*Task{}
+	m.nReduce = nReduce
 
-	for _, fname := range files {
-		taskId := uuid.New().String()
+	for i, fname := range files {
+		taskId := fmt.Sprintf("map%d", i)
 		m.MapTasks[taskId] = &Task{taskId, "map", fname, unassigned}
 	}
 
 	for i := 0; i < nReduce; i++ {
-		taskId := uuid.New().String()
+		taskId := fmt.Sprintf("reduce%d", i)
 		m.ReduceTasks[taskId] = &Task{taskId, "reduce", string(i), unassigned}
 	}
 

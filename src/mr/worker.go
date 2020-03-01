@@ -40,16 +40,28 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 
-	// uncomment to send the Example RPC to the master.
-	GetTask(workerId)
+	// TODO: add time.sleep if no task
+	task, err := GetTask(workerId)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Printf("reply Id %s, type %s, content %s, nreduce %d\n", task.TaskId, task.TaskType, task.TaskContent, task.NReduce)
+	// TODO if task type is map: produce mr-mapTaskId-R files, R from 0 to NReduce
+
+	// TODO: if task type is reduce, ask master for all intermediate file names, sort then produce final file
+
+	// TODO submit task
+	return
 
 }
 
-func GetTask(workerId string) {
+func GetTask(workerId string) (GetTaskResponse, error) {
 	args := GetTaskRequest{workerId}
 	reply := GetTaskResponse{}
-	call("Master.GetTask", &args, &reply)
-	fmt.Printf("reply Id %s, type %s, content %s\n", reply.TaskId, reply.TaskType, reply.TaskContent)
+	err := call("Master.GetTask", &args, &reply)
+	return reply, err
+
 }
 
 //
@@ -57,7 +69,7 @@ func GetTask(workerId string) {
 // usually returns true.
 // returns false if something goes wrong.
 //
-func call(rpcname string, args interface{}, reply interface{}) bool {
+func call(rpcname string, args interface{}, reply interface{}) error {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := masterSock()
 	c, err := rpc.DialHTTP("unix", sockname)
@@ -66,11 +78,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	}
 	defer c.Close()
 
-	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
-	}
+	return c.Call(rpcname, args, reply)
 
-	fmt.Println(err)
-	return false
 }

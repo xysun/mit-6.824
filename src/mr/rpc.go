@@ -19,6 +19,7 @@ type GetTaskResponse struct {
 	TaskId      string
 	TaskType    string
 	TaskContent string
+	NReduce     int
 }
 
 //
