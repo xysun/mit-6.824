@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"log"
 	"net/rpc"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -41,22 +42,42 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// TODO: add time.sleep if no task
-	task, err := GetTask(workerId)
-	if err != nil {
-		fmt.Println(err)
-		return
+	for {
+		fmt.Println("Asking for task...")
+		task, err := getTask(workerId)
+		if err == nil {
+			switch task.Err {
+			case "":
+				fmt.Printf("reply Id %s, type %s, content %s, nreduce %d\n", task.TaskId, task.TaskType, task.TaskContent, task.NReduce)
+				handleTask(task)
+
+			case NoTaskAvailable:
+				fmt.Println(NoTaskAvailable)
+			case AllTasksComplete:
+				fmt.Println("No more tasks, exiting")
+				return
+			}
+		} else {
+			fmt.Println("server error", err.Error())
+		}
+
+		time.Sleep(time.Duration(3) * time.Second)
 	}
-	fmt.Printf("reply Id %s, type %s, content %s, nreduce %d\n", task.TaskId, task.TaskType, task.TaskContent, task.NReduce)
+
+	return
+
+}
+
+func handleTask(task GetTaskResponse) {
 	// TODO if task type is map: produce mr-mapTaskId-R files, R from 0 to NReduce
 
 	// TODO: if task type is reduce, ask master for all intermediate file names, sort then produce final file
 
 	// TODO submit task
 	return
-
 }
 
-func GetTask(workerId string) (GetTaskResponse, error) {
+func getTask(workerId string) (GetTaskResponse, error) {
 	args := GetTaskRequest{workerId}
 	reply := GetTaskResponse{}
 	err := call("Master.GetTask", &args, &reply)

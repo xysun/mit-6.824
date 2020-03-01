@@ -6,8 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
 // RPC types for mapreduce
 
@@ -20,7 +22,13 @@ type GetTaskResponse struct {
 	TaskType    string
 	TaskContent string
 	NReduce     int
+	Err         string
 }
+
+// errors
+
+const NoTaskAvailable = "No task currently available"
+const AllTasksComplete = "All tasks have completed"
 
 //
 // example to show how to declare the arguments

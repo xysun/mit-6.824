@@ -35,6 +35,12 @@ func (task Task) isCompleted() bool {
 	}
 }
 
+func (task Task) toGetTaskResponse(response *GetTaskResponse) {
+	response.TaskId = task.Id
+	response.TaskType = task.Type
+	response.TaskContent = task.Content
+}
+
 type Master struct {
 	// Your definitions here.
 	MapTasks    map[string]*Task
@@ -46,6 +52,7 @@ func updateStatus(m map[string]*Task) bool {
 	// return whether everything is completed
 	completed := true
 	now := time.Now()
+	var tolerance float64 = 5
 
 	for k, v := range m {
 		task := *v
@@ -55,8 +62,8 @@ func updateStatus(m map[string]*Task) bool {
 		fmt.Println("%s %T", v.Id, task.Status)
 		t, ok := v.Status.(Assigned)
 		if ok {
-			if now.Sub(t.AssignedTime).Seconds() > 10 {
-				fmt.Printf("Task %s is more than 10s old, assigned time %s\n", k, t.AssignedTime)
+			if now.Sub(t.AssignedTime).Seconds() > tolerance {
+				fmt.Printf("Task %s is more than %.f seconds old, assigned time %s\n", k, tolerance, t.AssignedTime)
 				m[k] = &Task{task.Id, task.Type, task.Content, unassigned}
 			}
 		}
@@ -85,41 +92,53 @@ func all(m map[string]*Task, f func(Task) bool) bool {
 	return result
 }
 
+func isStatus(task Task, status string) bool {
+	s, ok := task.Status.(string)
+	return ok && s == status
+}
+
 // Your code here -- RPC handlers for the worker to call.
 
 func (m *Master) GetTask(args *GetTaskRequest, reply *GetTaskResponse) error {
 	workerId := args.WorkerId
 	fmt.Printf("Got GetTask request from worker %s\n", workerId)
 	now := time.Now()
-	f := func(task Task) bool {
-		s, ok := task.Status.(string)
-		return ok && s == unassigned
+	unassignedF := func(task Task) bool {
+		return isStatus(task, unassigned)
 	}
-	mapTask, err := find(m.MapTasks, f)
+
+	completedF := func(task Task) bool {
+		return isStatus(task, completed)
+	}
+
+	if all(m.MapTasks, completedF) && all(m.ReduceTasks, completedF) {
+		reply.Err = AllTasksComplete
+		return nil
+	}
+
+	mapTask, err := find(m.MapTasks, unassignedF)
 	if err != nil {
 		// only proceed to reduce tasks if all map tasks are completed
 		if all(m.MapTasks, func(task Task) bool { return task.Status == completed }) {
-			reduceTask, err2 := find(m.ReduceTasks, f)
+			reduceTask, err2 := find(m.ReduceTasks, unassignedF)
 			if err2 != nil {
-				return errors.New("no task available")
+				reply.Err = NoTaskAvailable
+			} else {
+				reduceTask.toGetTaskResponse(reply)
+				reply.NReduce = m.nReduce
+				reduceTask.Status = Assigned{workerId, now}
 			}
 
-			reply.TaskId = reduceTask.Id
-			reply.TaskType = "reduce"
-			reply.TaskContent = reduceTask.Content
-			reply.NReduce = m.nReduce
-			(*reduceTask).Status = Assigned{workerId, now}
-			return nil
 		} else {
-			return errors.New("Map tasks are not completed yet, cannot assign reduce tasks")
+			reply.Err = NoTaskAvailable
 		}
 
+	} else {
+		mapTask.toGetTaskResponse(reply)
+		reply.NReduce = m.nReduce
+		mapTask.Status = Assigned{workerId, now}
 	}
-	reply.TaskId = mapTask.Id
-	reply.TaskType = "map"
-	reply.TaskContent = mapTask.Content
-	reply.NReduce = m.nReduce
-	(*mapTask).Status = Assigned{workerId, now}
+
 	return nil
 
 }
