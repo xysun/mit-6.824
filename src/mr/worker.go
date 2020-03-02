@@ -117,7 +117,7 @@ func handleMapTask(taskId string, inputFile string, nReduce int, mapf func(strin
 		r := ihash(kv.Key) % nReduce
 		_, ok := intermediateFiles[r]
 		if !ok {
-			intermediateFiles[r], _ = os.Create(fmt.Sprintf("mr-%s-%d", taskId, r))
+			intermediateFiles[r], _ = ioutil.TempFile("", "mr-*")
 		}
 		outf, _ := intermediateFiles[r]
 		enc := json.NewEncoder(outf)
@@ -126,8 +126,10 @@ func handleMapTask(taskId string, inputFile string, nReduce int, mapf func(strin
 
 	result := []string{}
 	for r, fHandle := range intermediateFiles {
-		result = append(result, fmt.Sprintf("mr-%s-%d", taskId, r))
+		finalName := fmt.Sprintf("mr-%s-%d", taskId, r)
+		result = append(result, finalName)
 		fHandle.Close()
+		os.Rename(fHandle.Name(), finalName)
 	}
 
 	return result
@@ -154,7 +156,7 @@ func handleReduceTask(taskId string, inputFiles []string, reducef func(string, [
 	sort.Sort(ByKey(intermediate))
 	// for each key, call reducef, write to output
 	oname := fmt.Sprintf("mr-out-%s", taskId)
-	ofile, _ := os.Create(oname)
+	ofile, _ := ioutil.TempFile("", "mr-out-*")
 	i := 0
 	for i < len(intermediate) {
 		j := i + 1
@@ -174,6 +176,7 @@ func handleReduceTask(taskId string, inputFiles []string, reducef func(string, [
 	}
 
 	ofile.Close()
+	os.Rename(ofile.Name(), oname)
 
 	return ""
 }

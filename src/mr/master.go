@@ -55,7 +55,7 @@ func updateStatus(m map[string]*Task) bool {
 	// return whether everything is completed
 	completed := true
 	now := time.Now()
-	var tolerance float64 = 5
+	var tolerance float64 = 10
 
 	for k, v := range m {
 		task := *v
