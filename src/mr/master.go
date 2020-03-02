@@ -9,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -47,6 +48,7 @@ type Master struct {
 	MapTasks    map[string]*Task
 	ReduceTasks map[string]*Task
 	nReduce     int
+	mux         sync.Mutex
 }
 
 func updateStatus(m map[string]*Task) bool {
@@ -111,12 +113,16 @@ func (m *Master) SubmitTask(args *SubmitTaskRequest, reply *SubmitTaskResponse) 
 			reduceTask := m.ReduceTasks[reduceTaskId]
 			reduceTask.Content = append(reduceTask.Content, fname)
 		}
+		m.mux.Lock()
 		mapTask.Status = completed
+		m.mux.Unlock()
 	}
 	reduceTask, ok := m.ReduceTasks[args.TaskId]
 	if ok {
 		fmt.Printf("Submit reduce task %s\n", args.TaskId)
+		m.mux.Lock()
 		reduceTask.Status = completed
+		m.mux.Unlock()
 	}
 
 	reply.Msg = "ok"
@@ -150,7 +156,9 @@ func (m *Master) GetTask(args *GetTaskRequest, reply *GetTaskResponse) error {
 			} else {
 				reduceTask.toGetTaskResponse(reply)
 				reply.NReduce = m.nReduce
+				m.mux.Lock()
 				reduceTask.Status = Assigned{workerId, now}
+				m.mux.Unlock()
 			}
 
 		} else {
@@ -160,7 +168,9 @@ func (m *Master) GetTask(args *GetTaskRequest, reply *GetTaskResponse) error {
 	} else {
 		mapTask.toGetTaskResponse(reply)
 		reply.NReduce = m.nReduce
+		m.mux.Lock()
 		mapTask.Status = Assigned{workerId, now}
+		m.mux.Unlock()
 	}
 
 	return nil
@@ -191,7 +201,9 @@ func (m *Master) Done() bool {
 	// Done is called every second, so we can use this to check the task status and reassign
 	// go through every task in MapTasks and ReduceTasks
 
+	m.mux.Lock()
 	ret := updateStatus(m.MapTasks) && updateStatus(m.ReduceTasks)
+	m.mux.Unlock()
 
 	fmt.Printf("Done checking result %b\n", ret)
 
