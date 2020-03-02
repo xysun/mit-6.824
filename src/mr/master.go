@@ -107,11 +107,16 @@ func (m *Master) SubmitTask(args *SubmitTaskRequest, reply *SubmitTaskResponse) 
 		fmt.Printf("Submit map task %s\n", args.TaskId)
 		for _, fname := range args.Files {
 			t := strings.Split(fname, "-")
-			reduceTaskId := fmt.Sprintf("reduce%s", t[2])
+			reduceTaskId := t[2]
 			reduceTask := m.ReduceTasks[reduceTaskId]
 			reduceTask.Content = append(reduceTask.Content, fname)
 		}
 		mapTask.Status = completed
+	}
+	reduceTask, ok := m.ReduceTasks[args.TaskId]
+	if ok {
+		fmt.Printf("Submit reduce task %s\n", args.TaskId)
+		reduceTask.Status = completed
 	}
 
 	reply.Msg = "ok"
@@ -213,7 +218,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 	}
 
 	for i := 0; i < nReduce; i++ {
-		taskId := fmt.Sprintf("reduce%d", i)
+		taskId := fmt.Sprintf("%d", i)
 		m.ReduceTasks[taskId] = &Task{taskId, reduceTask, []string{}, unassigned}
 	}
 
