@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -110,7 +111,8 @@ func handleMapTask(taskId string, inputFile string, nReduce int, mapf func(strin
 			intermediateFiles[r], _ = os.Create(fmt.Sprintf("mr-%s-%d", taskId, r))
 		}
 		outf, _ := intermediateFiles[r]
-		fmt.Fprintf(outf, "%v %v\n", kv.Key, kv.Value)
+		enc := json.NewEncoder(outf)
+		enc.Encode(&kv)
 	}
 
 	result := []string{}
