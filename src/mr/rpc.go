@@ -26,7 +26,12 @@ type GetTaskResponse struct {
 }
 
 type SubmitTaskRequest struct {
-	Files []string
+	TaskId string
+	Files  []string
+}
+
+type SubmitTaskResponse struct {
+	Msg string
 }
 
 const mapTask = "map"

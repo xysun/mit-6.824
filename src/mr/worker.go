@@ -52,8 +52,11 @@ func Worker(mapf func(string, string) []KeyValue,
 			switch task.Err {
 			case "":
 				fmt.Printf("Got new task Id %s, type %s, content %s, nreduce %d\n", task.TaskId, task.TaskType, task.TaskContent, task.NReduce)
-				handleTask(task, mapf, reducef)
-				fmt.Println("Task handled!")
+				taskSubmitRequest, err := handleTask(task, mapf, reducef)
+				if err == nil {
+					fmt.Println("Task handled!")
+					call("Master.SubmitTask", &taskSubmitRequest, &SubmitTaskResponse{})
+				}
 
 			case NoTaskAvailable:
 				fmt.Println(NoTaskAvailable)
@@ -77,9 +80,9 @@ func handleTask(task GetTaskResponse, mapf func(string, string) []KeyValue,
 	switch task.TaskType {
 	case mapTask:
 		// TODO: raise error if TaskContent size is not 1
-		return SubmitTaskRequest{handleMapTask(task.TaskId, task.TaskContent[0], task.NReduce, mapf)}, nil
+		return SubmitTaskRequest{task.TaskId, handleMapTask(task.TaskId, task.TaskContent[0], task.NReduce, mapf)}, nil
 	case reduceTask:
-		return SubmitTaskRequest{[]string{handleReduceTask(task.TaskId, task.TaskContent)}}, nil
+		return SubmitTaskRequest{task.TaskId, []string{handleReduceTask(task.TaskId, task.TaskContent)}}, nil
 	default:
 		return SubmitTaskRequest{}, errors.New(fmt.Sprintf("Invalid task type %s", task.TaskType))
 	}
@@ -129,7 +132,6 @@ func getTask(workerId string) (GetTaskResponse, error) {
 	reply := GetTaskResponse{}
 	err := call("Master.GetTask", &args, &reply)
 	return reply, err
-
 }
 
 //

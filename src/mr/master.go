@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -98,6 +99,24 @@ func isStatus(task Task, status string) bool {
 }
 
 // Your code here -- RPC handlers for the worker to call.
+
+func (m *Master) SubmitTask(args *SubmitTaskRequest, reply *SubmitTaskResponse) error {
+	fmt.Printf("Got task submit request %s %s\n", args.TaskId, args.Files)
+	mapTask, ok := m.MapTasks[args.TaskId]
+	if ok {
+		fmt.Printf("Submit map task %s\n", args.TaskId)
+		for _, fname := range args.Files {
+			t := strings.Split(fname, "-")
+			reduceTaskId := fmt.Sprintf("reduce%s", t[2])
+			reduceTask := m.ReduceTasks[reduceTaskId]
+			reduceTask.Content = append(reduceTask.Content, fname)
+		}
+		mapTask.Status = completed
+	}
+
+	reply.Msg = "ok"
+	return nil
+}
 
 func (m *Master) GetTask(args *GetTaskRequest, reply *GetTaskResponse) error {
 	workerId := args.WorkerId
