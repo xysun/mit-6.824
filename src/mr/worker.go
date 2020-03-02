@@ -1,10 +1,13 @@
 package mr
 
 import (
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
 	"net/rpc"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -48,8 +51,9 @@ func Worker(mapf func(string, string) []KeyValue,
 		if err == nil {
 			switch task.Err {
 			case "":
-				fmt.Printf("reply Id %s, type %s, content %s, nreduce %d\n", task.TaskId, task.TaskType, task.TaskContent, task.NReduce)
-				handleTask(task)
+				fmt.Printf("Got new task Id %s, type %s, content %s, nreduce %d\n", task.TaskId, task.TaskType, task.TaskContent, task.NReduce)
+				handleTask(task, mapf, reducef)
+				fmt.Println("Task handled!")
 
 			case NoTaskAvailable:
 				fmt.Println(NoTaskAvailable)
@@ -64,17 +68,60 @@ func Worker(mapf func(string, string) []KeyValue,
 		time.Sleep(time.Duration(3) * time.Second)
 	}
 
-	return
+	// return
 
 }
 
-func handleTask(task GetTaskResponse) {
-	// TODO if task type is map: produce mr-mapTaskId-R files, R from 0 to NReduce
+func handleTask(task GetTaskResponse, mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) (SubmitTaskRequest, error) {
+	switch task.TaskType {
+	case mapTask:
+		// TODO: raise error if TaskContent size is not 1
+		return SubmitTaskRequest{handleMapTask(task.TaskId, task.TaskContent[0], task.NReduce, mapf)}, nil
+	case reduceTask:
+		return SubmitTaskRequest{[]string{handleReduceTask(task.TaskId, task.TaskContent)}}, nil
+	default:
+		return SubmitTaskRequest{}, errors.New(fmt.Sprintf("Invalid task type %s", task.TaskType))
+	}
+}
 
-	// TODO: if task type is reduce, ask master for all intermediate file names, sort then produce final file
+func handleMapTask(taskId string, inputFile string, nReduce int, mapf func(string, string) []KeyValue) []string {
+	// call mapF, hash the key-value pairs and
+	// produce mr-mapTaskId-R files, R from 0 to NReduce
+	// basically copy from mrsequential
+	file, err := os.Open(inputFile)
+	if err != nil {
+		log.Fatalf("cannot open %v", inputFile)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", inputFile)
+	}
+	file.Close()
+	kva := mapf(inputFile, string(content))
+	var intermediateFiles = make(map[int]*os.File)
+	for _, kv := range kva {
+		r := ihash(kv.Key) % nReduce
+		_, ok := intermediateFiles[r]
+		if !ok {
+			intermediateFiles[r], _ = os.Create(fmt.Sprintf("mr-%s-%d", taskId, r))
+		}
+		outf, _ := intermediateFiles[r]
+		fmt.Fprintf(outf, "%v %v\n", kv.Key, kv.Value)
+	}
 
-	// TODO submit task
-	return
+	result := []string{}
+	for r, fHandle := range intermediateFiles {
+		result = append(result, fmt.Sprintf("mr-%s-%d", taskId, r))
+		fHandle.Close()
+	}
+
+	return result
+}
+
+func handleReduceTask(taskId string, inputFiles []string) string {
+	// produce one single output file
+	return ""
 }
 
 func getTask(workerId string) (GetTaskResponse, error) {

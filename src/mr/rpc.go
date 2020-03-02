@@ -20,28 +20,22 @@ type GetTaskRequest struct {
 type GetTaskResponse struct {
 	TaskId      string
 	TaskType    string
-	TaskContent string
-	NReduce     int
-	Err         string
+	TaskContent []string // for map: single filename; for reduce: a list of intermediate file names
+	NReduce     int      // TODO: separate a "getMeta" RPC call?
+	Err         string   // TODO: make it more elegant?
 }
+
+type SubmitTaskRequest struct {
+	Files []string
+}
+
+const mapTask = "map"
+const reduceTask = "reduce"
 
 // errors
 
 const NoTaskAvailable = "No task currently available"
 const AllTasksComplete = "All tasks have completed"
-
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
-
-type ExampleArgs struct {
-	X int
-}
-
-type ExampleReply struct {
-	Y int
-}
 
 // Add your RPC definitions here.
 

@@ -22,7 +22,7 @@ type Assigned struct {
 type Task struct {
 	Id      string
 	Type    string      // "map" or "reduce" TODO: enum
-	Content string      // for map: it's input file name; for reduce it's `R`
+	Content []string    // for map: it's input file name; for reduce: initially it's empty list, then it will be all intermediatery files
 	Status  interface{} // "unassigned/completed" or Assigned
 }
 
@@ -190,12 +190,12 @@ func MakeMaster(files []string, nReduce int) *Master {
 
 	for i, fname := range files {
 		taskId := fmt.Sprintf("map%d", i)
-		m.MapTasks[taskId] = &Task{taskId, "map", fname, unassigned}
+		m.MapTasks[taskId] = &Task{taskId, mapTask, []string{fname}, unassigned}
 	}
 
 	for i := 0; i < nReduce; i++ {
 		taskId := fmt.Sprintf("reduce%d", i)
-		m.ReduceTasks[taskId] = &Task{taskId, "reduce", string(i), unassigned}
+		m.ReduceTasks[taskId] = &Task{taskId, reduceTask, []string{}, unassigned}
 	}
 
 	fmt.Printf("Master initialized, map tasks total %d, reduce tasks total %d\n", len(m.MapTasks), len(m.ReduceTasks))
