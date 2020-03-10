@@ -54,7 +54,6 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 
-	// TODO: add time.sleep if no task
 	for {
 		fmt.Println("Asking for task...")
 		task, err := getTask(workerId)
@@ -78,10 +77,8 @@ func Worker(mapf func(string, string) []KeyValue,
 			fmt.Println("server error", err.Error())
 		}
 
-		time.Sleep(time.Duration(3) * time.Second)
+		time.Sleep(time.Duration(2) * time.Second)
 	}
-
-	// return
 
 }
 

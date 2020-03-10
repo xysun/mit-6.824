@@ -107,18 +107,20 @@ func (m *Master) SubmitTask(args *SubmitTaskRequest, reply *SubmitTaskResponse) 
 	mapTask, ok := m.MapTasks[args.TaskId]
 	if ok {
 		fmt.Printf("Submit map task %s\n", args.TaskId)
-		for _, fname := range args.Files {
-			t := strings.Split(fname, "-")
-			reduceTaskId := t[2]
-			reduceTask := m.ReduceTasks[reduceTaskId]
-			reduceTask.Content = append(reduceTask.Content, fname)
+		if mapTask.Status != completed {
+			m.mux.Lock()
+			for _, fname := range args.Files {
+				t := strings.Split(fname, "-")
+				reduceTaskId := t[2]
+				reduceTask := m.ReduceTasks[reduceTaskId]
+				reduceTask.Content = append(reduceTask.Content, fname)
+			}
+			mapTask.Status = completed
+			m.mux.Unlock()
 		}
-		m.mux.Lock()
-		mapTask.Status = completed
-		m.mux.Unlock()
 	}
 	reduceTask, ok := m.ReduceTasks[args.TaskId]
-	if ok {
+	if ok && reduceTask.Status != completed {
 		fmt.Printf("Submit reduce task %s\n", args.TaskId)
 		m.mux.Lock()
 		reduceTask.Status = completed
