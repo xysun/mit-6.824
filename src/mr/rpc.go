@@ -6,24 +6,43 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
+// RPC types for mapreduce
 
-type ExampleArgs struct {
-	X int
+type GetTaskRequest struct {
+	WorkerId string
 }
 
-type ExampleReply struct {
-	Y int
+type GetTaskResponse struct {
+	TaskId      string
+	TaskType    string
+	TaskContent []string // for map: single filename; for reduce: a list of intermediate file names
+	NReduce     int      // TODO: separate a "getMeta" RPC call?
+	Err         string   // TODO: make it more elegant?
 }
+
+type SubmitTaskRequest struct {
+	TaskId string
+	Files  []string
+}
+
+type SubmitTaskResponse struct {
+	Msg string
+}
+
+const mapTask = "map"
+const reduceTask = "reduce"
+
+// errors
+
+const NoTaskAvailable = "No task currently available"
+const AllTasksComplete = "All tasks have completed"
 
 // Add your RPC definitions here.
-
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.
