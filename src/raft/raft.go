@@ -189,6 +189,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		rf.state = 0
 		rf.votesSoFar = 0
+		rf.currentTerm = args.Term
 		rf.lastHeardFromLeader = t
 		fmt.Printf("Server %d acked heartbeat, going back to follower\n", rf.me)
 	} else {
@@ -263,8 +264,9 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	// if reply is false, transition back into follower (?)
 	if ok && !reply.Success {
-		fmt.Printf("Got false reply from server %d for leader %d, leader transition back to follower!", server, rf.me)
 		rf.mu.Lock()
+		fmt.Printf("Got false reply from server %d for leader %d, their term %d, my term %d, leader transition back to follower!\n",
+			server, rf.me, reply.Term, rf.currentTerm)
 		rf.state = 0
 		rf.votesSoFar = 0
 		rf.currentTerm = reply.Term
@@ -334,7 +336,9 @@ func (rf *Raft) electionTick() {
 		rf.mu.Lock()
 
 		tdiff := t.Sub(rf.lastHeardFromLeader)
-		fmt.Printf("It has been %d ms since last heard from leader for server %d, threshold is %d\n", tdiff.Milliseconds(), rf.me, electionTimeout)
+		if rf.state == 0 {
+			fmt.Printf("It has been %d ms since last heard from leader for server %d, threshold is %d\n", tdiff.Milliseconds(), rf.me, electionTimeout)
+		}
 
 		if tdiff > electionTimeoutDuration && rf.state == 0 {
 
@@ -358,15 +362,25 @@ func (rf *Raft) electionTick() {
 			time.Sleep(electionTimeoutDuration)
 			// am I leader yet?
 			rf.mu.Lock()
-			if rf.state == 1 { // I am still a candidate
-				if rf.votesSoFar <= len(rf.peers)/2 {
-					// I do not have enough votes, start new election
-					fmt.Printf("Server %d does not have enough votes, start new election!\n", rf.me)
-					// TODO: should have a while loop here
-
+			for rf.state == 1 && rf.votesSoFar <= len(rf.peers)/2 { // i'm a candidate with not enough votes
+				fmt.Printf("Server %d does not have enough votes, start new election!\n", rf.me)
+				rf.currentTerm++
+				rf.votedFor = rf.me
+				rf.votesSoFar = 1
+				args := RequestVoteArgs{}
+				args.Term = rf.currentTerm
+				args.CandidateId = rf.me
+				rf.mu.Unlock()
+				for i := range rf.peers {
+					if i != rf.me {
+						go rf.sendRequestVote(i, &args, &RequestVoteReply{})
+					}
 				}
+				time.Sleep(electionTimeoutDuration)
+				rf.mu.Lock()
 			}
 			rf.mu.Unlock()
+
 		} else {
 			fmt.Printf("Server %d has recently heard from leader or is not a follower, do nothing...\n", rf.me)
 			rf.mu.Unlock()
