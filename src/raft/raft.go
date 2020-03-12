@@ -243,17 +243,18 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			fmt.Printf("Server %d asks server %d for a vote, result is %t\n", rf.me, server, reply.VoteGranted)
 			if reply.VoteGranted {
 				rf.mu.Lock()
-				rf.votesSoFar++
-				if rf.votesSoFar > len(rf.peers)/2 {
-					// majority, i am a leader now!
-					fmt.Printf("Server %d is a leader now!\n", rf.me)
-					rf.state = 2
-					rf.votesSoFar = 0
-					rf.mu.Unlock()
-					go rf.heartbeatTick()
-				} else {
-					rf.mu.Unlock()
+				// re-check assumption: i am still a candidate with same term
+				if rf.state == 1 && rf.currentTerm == args.Term {
+					rf.votesSoFar++
+					if rf.votesSoFar > len(rf.peers)/2 {
+						// majority, i am a leader now!
+						fmt.Printf("Server %d is a leader now!\n", rf.me)
+						rf.state = 2
+						rf.votesSoFar = 0
+						go rf.heartbeatTick()
+					}
 				}
+				rf.mu.Unlock()
 			}
 		}
 		return ok
@@ -351,7 +352,7 @@ func (rf *Raft) electionTick() {
 	electionTimeout := rand.Intn(800) + 200
 	electionTimeoutDuration := time.Duration(electionTimeout) * time.Millisecond
 	fmt.Printf("Election timeout for server %d is %d ms\n", rf.me, electionTimeout)
-	for {
+	for !rf.killed() {
 		// sleep for a short while, 200 because we send heartbeat every 200ms
 
 		time.Sleep(electionTimeoutDuration)
@@ -392,7 +393,7 @@ func (rf *Raft) electionTick() {
 func (rf *Raft) heartbeatTick() {
 	fmt.Printf("Running heartbeat tick for server %d\n", rf.me)
 	// send heartbeat every 200ms, IIF server is leader
-	for {
+	for !rf.killed() {
 		// heartbeat should start immediately
 		fmt.Printf("initiating heartbeat tick for server %d\n", rf.me)
 		rf.mu.Lock()
