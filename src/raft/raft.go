@@ -156,21 +156,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	if args.Term > rf.currentTerm {
-		// a new term, I should vote
+		// a new term, I should vote, and revert to follower
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term
+		rf.state = 0
+		rf.votesSoFar = 0
 	} else {
 		if rf.currentTerm > args.Term {
 			// invalid
 			reply.VoteGranted = false
-		} else {
-			if rf.votedFor != -1 { // i have voted
+		} else { // same term, have I voted?
+			if rf.votedFor != -1 {
 				reply.VoteGranted = false
 			} else { // vote!
 				reply.VoteGranted = true
 				rf.votedFor = args.CandidateId
 				rf.currentTerm = args.Term
+				rf.state = 0
+				rf.votesSoFar = 0
 			}
 		}
 	}
@@ -191,6 +195,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votesSoFar = 0
 		rf.currentTerm = args.Term
 		rf.lastHeardFromLeader = t
+		rf.votedFor = -1
 		fmt.Printf("Server %d acked heartbeat, going back to follower\n", rf.me)
 	} else {
 		reply.Success = false
@@ -320,6 +325,24 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) startElection() {
+	// rf starts with locked
+	rf.currentTerm++
+	rf.votedFor = rf.me
+	rf.votesSoFar = 1
+
+	args := RequestVoteArgs{}
+	args.Term = rf.currentTerm
+	args.CandidateId = rf.me
+
+	rf.mu.Unlock()
+	for i := range rf.peers {
+		if i != rf.me {
+			go rf.sendRequestVote(i, &args, &RequestVoteReply{})
+		}
+	}
+}
+
 func (rf *Raft) electionTick() {
 	// transition into candidate, if haven't heard from leader, AND you are a follower
 	fmt.Printf("Running election tick for server %d\n", rf.me)
@@ -343,39 +366,15 @@ func (rf *Raft) electionTick() {
 		if tdiff > electionTimeoutDuration && rf.state == 0 {
 
 			rf.state = 1
-			rf.currentTerm++
-			rf.votedFor = rf.me
-			rf.votesSoFar = 1
-			fmt.Printf("Server %d is transitioning into candidate!, term %d \n", rf.me, rf.currentTerm)
-
-			args := RequestVoteArgs{}
-			args.Term = rf.currentTerm
-			args.CandidateId = rf.me
-
-			rf.mu.Unlock()
-			for i := range rf.peers {
-				if i != rf.me {
-					go rf.sendRequestVote(i, &args, &RequestVoteReply{})
-				}
-			}
+			fmt.Printf("Server %d is transitioning into candidate!, from term %d \n", rf.me, rf.currentTerm)
+			rf.startElection()
 
 			time.Sleep(electionTimeoutDuration)
 			// am I leader yet?
 			rf.mu.Lock()
-			for rf.state == 1 && rf.votesSoFar <= len(rf.peers)/2 { // i'm a candidate with not enough votes
+			for rf.state == 1 && rf.votesSoFar <= len(rf.peers)/2 { // i'm still a candidate with not enough votes; this means I didn't win the election, I also haven't acked a leader
 				fmt.Printf("Server %d does not have enough votes, start new election!\n", rf.me)
-				rf.currentTerm++
-				rf.votedFor = rf.me
-				rf.votesSoFar = 1
-				args := RequestVoteArgs{}
-				args.Term = rf.currentTerm
-				args.CandidateId = rf.me
-				rf.mu.Unlock()
-				for i := range rf.peers {
-					if i != rf.me {
-						go rf.sendRequestVote(i, &args, &RequestVoteReply{})
-					}
-				}
+				rf.startElection()
 				time.Sleep(electionTimeoutDuration)
 				rf.mu.Lock()
 			}
