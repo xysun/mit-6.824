@@ -47,6 +47,14 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+type State string
+
+const (
+	Follower  State = "follower"
+	Candidate       = "candidate"
+	Leader          = "leader"
+)
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -64,7 +72,7 @@ type Raft struct {
 	// 2A:
 	currentTerm         int
 	votedFor            int // -1 as the nil value
-	state               int // 0: follower, 1: candidate, 2: leader
+	state               State
 	lastHeardFromLeader time.Time
 	votesSoFar          int
 }
@@ -76,7 +84,7 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	rf.mu.Lock()
 	ct := rf.currentTerm
-	s := rf.state == 2
+	s := rf.state == Leader
 	rf.mu.Unlock()
 	return ct, s
 }
@@ -160,7 +168,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term
-		rf.state = 0
+		rf.state = Follower
 		rf.votesSoFar = 0
 	} else {
 		if rf.currentTerm > args.Term {
@@ -173,7 +181,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				reply.VoteGranted = true
 				rf.votedFor = args.CandidateId
 				rf.currentTerm = args.Term
-				rf.state = 0
+				rf.state = Follower
 				rf.votesSoFar = 0
 			}
 		}
@@ -191,7 +199,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	fmt.Printf("Server %d Got heartbeat from server %d, my term is %d, theirs is %d\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
 	if args.Term >= rf.currentTerm {
 		reply.Success = true
-		rf.state = 0
+		rf.state = Follower
 		rf.votesSoFar = 0
 		rf.currentTerm = args.Term
 		rf.lastHeardFromLeader = t
@@ -236,7 +244,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	// only send if you are still a candidate
 	rf.mu.Lock()
-	if rf.state == 1 {
+	if rf.state == Candidate {
 		rf.mu.Unlock()
 		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 		if ok {
@@ -244,12 +252,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			if reply.VoteGranted {
 				rf.mu.Lock()
 				// re-check assumption: i am still a candidate with same term
-				if rf.state == 1 && rf.currentTerm == args.Term {
+				if rf.state == Candidate && rf.currentTerm == args.Term {
 					rf.votesSoFar++
 					if rf.votesSoFar > len(rf.peers)/2 {
 						// majority, i am a leader now!
 						fmt.Printf("Server %d is a leader now!\n", rf.me)
-						rf.state = 2
+						rf.state = Leader
 						rf.votesSoFar = 0
 						go rf.heartbeatTick()
 					}
@@ -273,7 +281,7 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 		rf.mu.Lock()
 		fmt.Printf("Got false reply from server %d for leader %d, their term %d, my term %d, leader transition back to follower!\n",
 			server, rf.me, reply.Term, rf.currentTerm)
-		rf.state = 0
+		rf.state = Follower
 		rf.votesSoFar = 0
 		rf.currentTerm = reply.Term
 		rf.mu.Unlock()
@@ -360,20 +368,20 @@ func (rf *Raft) electionTick() {
 		rf.mu.Lock()
 
 		tdiff := t.Sub(rf.lastHeardFromLeader)
-		if rf.state == 0 {
+		if rf.state == Follower {
 			fmt.Printf("It has been %d ms since last heard from leader for server %d, threshold is %d\n", tdiff.Milliseconds(), rf.me, electionTimeout)
 		}
 
-		if tdiff > electionTimeoutDuration && rf.state == 0 {
+		if tdiff > electionTimeoutDuration && rf.state == Follower {
 
-			rf.state = 1
+			rf.state = Candidate
 			fmt.Printf("Server %d is transitioning into candidate!, from term %d \n", rf.me, rf.currentTerm)
 			rf.startElection()
 
 			time.Sleep(electionTimeoutDuration)
 			// am I leader yet?
 			rf.mu.Lock()
-			for rf.state == 1 && rf.votesSoFar <= len(rf.peers)/2 { // i'm still a candidate with not enough votes; this means I didn't win the election, I also haven't acked a leader
+			for rf.state == Candidate && rf.votesSoFar <= len(rf.peers)/2 { // i'm still a candidate with not enough votes; this means I didn't win the election, I also haven't acked a leader
 				fmt.Printf("Server %d does not have enough votes, start new election!\n", rf.me)
 				rf.startElection()
 				time.Sleep(electionTimeoutDuration)
@@ -397,7 +405,7 @@ func (rf *Raft) heartbeatTick() {
 		// heartbeat should start immediately
 		fmt.Printf("initiating heartbeat tick for server %d\n", rf.me)
 		rf.mu.Lock()
-		if rf.state == 2 {
+		if rf.state == Leader {
 			// Start a goroutine that send heartbeat and process replies
 			// Be careful of deadlock
 			args := AppendEntriesArgs{}
@@ -438,7 +446,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.votesSoFar = 0
-	rf.state = 0 // start as follower
+	rf.state = Follower // start as follower
 	rf.lastHeardFromLeader = time.Now().Add(-1 * time.Hour)
 
 	// start the infinite doing-work loop
