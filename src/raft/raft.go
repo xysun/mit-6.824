@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -196,7 +195,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// if not, reply false, continue
 	rf.mu.Lock()
 	t := time.Now()
-	fmt.Printf("Server %d Got heartbeat from server %d, my term is %d, theirs is %d\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
+	DPrintf("[%d] Got heartbeat from server %d, my term is %d, theirs is %d\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
 	if args.Term >= rf.currentTerm {
 		reply.Success = true
 		rf.state = Follower
@@ -204,7 +203,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.lastHeardFromLeader = t
 		rf.votedFor = -1
-		fmt.Printf("Server %d acked heartbeat, going back to follower\n", rf.me)
+		DPrintf("[%d] Acked heartbeat, going back to follower\n", rf.me)
 	} else {
 		reply.Success = false
 		reply.Term = rf.currentTerm
@@ -248,7 +247,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		rf.mu.Unlock()
 		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 		if ok {
-			fmt.Printf("Server %d asks server %d for a vote, result is %t\n", rf.me, server, reply.VoteGranted)
+			DPrintf("[%d] Server asks server %d for a vote, result is %t\n", rf.me, server, reply.VoteGranted)
 			if reply.VoteGranted {
 				rf.mu.Lock()
 				// re-check assumption: i am still a candidate with same term
@@ -256,7 +255,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 					rf.votesSoFar++
 					if rf.votesSoFar > len(rf.peers)/2 {
 						// majority, i am a leader now!
-						fmt.Printf("Server %d is a leader now!\n", rf.me)
+						DPrintf("[%d] Server is a leader now!\n", rf.me)
 						rf.state = Leader
 						rf.votesSoFar = 0
 						go rf.heartbeatTick()
@@ -267,7 +266,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		}
 		return ok
 	} else {
-		fmt.Printf("Server %d is no longer a candidate! Skipping vote request...\n", rf.me)
+		DPrintf("[%d] Server is no longer a candidate! Skipping vote request...\n", rf.me)
 		rf.mu.Unlock()
 		return true
 	}
@@ -279,7 +278,7 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 	// if reply is false, transition back into follower (?)
 	if ok && !reply.Success {
 		rf.mu.Lock()
-		fmt.Printf("Got false reply from server %d for leader %d, their term %d, my term %d, leader transition back to follower!\n",
+		DPrintf("Got false reply from server %d for leader %d, their term %d, my term %d, leader transition back to follower!\n",
 			server, rf.me, reply.Term, rf.currentTerm)
 		rf.state = Follower
 		rf.votesSoFar = 0
@@ -354,12 +353,12 @@ func (rf *Raft) startElection() {
 
 func (rf *Raft) electionTick() {
 	// transition into candidate, if haven't heard from leader, AND you are a follower
-	fmt.Printf("Running election tick for server %d\n", rf.me)
+	DPrintf("[%d] Running election tick\n", rf.me)
 	// starts as follower, hence no heartbeat sent
 	// decides election timeout, [200,1000] ms; we will send heartbeat every 200ms
 	electionTimeout := rand.Intn(800) + 200
 	electionTimeoutDuration := time.Duration(electionTimeout) * time.Millisecond
-	fmt.Printf("Election timeout for server %d is %d ms\n", rf.me, electionTimeout)
+	DPrintf("[%d] Election timeout for is %d ms\n", rf.me, electionTimeout)
 	for !rf.killed() {
 		// sleep for a short while, 200 because we send heartbeat every 200ms
 
@@ -369,20 +368,20 @@ func (rf *Raft) electionTick() {
 
 		tdiff := t.Sub(rf.lastHeardFromLeader)
 		if rf.state == Follower {
-			fmt.Printf("It has been %d ms since last heard from leader for server %d, threshold is %d\n", tdiff.Milliseconds(), rf.me, electionTimeout)
+			DPrintf("[%d] It has been %d ms since last heard from leader, threshold is %d\n", rf.me, tdiff.Milliseconds(), electionTimeout)
 		}
 
 		if tdiff > electionTimeoutDuration && rf.state == Follower {
 
 			rf.state = Candidate
-			fmt.Printf("Server %d is transitioning into candidate!, from term %d \n", rf.me, rf.currentTerm)
+			DPrintf("[%d] Server is transitioning into candidate!, from term %d \n", rf.me, rf.currentTerm)
 			rf.startElection()
 
 			time.Sleep(electionTimeoutDuration)
 			// am I leader yet?
 			rf.mu.Lock()
 			for rf.state == Candidate && rf.votesSoFar <= len(rf.peers)/2 { // i'm still a candidate with not enough votes; this means I didn't win the election, I also haven't acked a leader
-				fmt.Printf("Server %d does not have enough votes, start new election!\n", rf.me)
+				DPrintf("[%d] Server does not have enough votes, start new election!\n", rf.me)
 				rf.startElection()
 				time.Sleep(electionTimeoutDuration)
 				rf.mu.Lock()
@@ -390,7 +389,7 @@ func (rf *Raft) electionTick() {
 			rf.mu.Unlock()
 
 		} else {
-			fmt.Printf("Server %d has recently heard from leader or is not a follower, do nothing...\n", rf.me)
+			DPrintf("[%d] Server has recently heard from leader or is not a follower, do nothing...\n", rf.me)
 			rf.mu.Unlock()
 		}
 
@@ -399,11 +398,11 @@ func (rf *Raft) electionTick() {
 }
 
 func (rf *Raft) heartbeatTick() {
-	fmt.Printf("Running heartbeat tick for server %d\n", rf.me)
+	DPrintf("[%d] Running heartbeat tick\n", rf.me)
 	// send heartbeat every 200ms, IIF server is leader
 	for !rf.killed() {
 		// heartbeat should start immediately
-		fmt.Printf("initiating heartbeat tick for server %d\n", rf.me)
+		DPrintf("[%d] Initiating heartbeat tick \n", rf.me)
 		rf.mu.Lock()
 		if rf.state == Leader {
 			// Start a goroutine that send heartbeat and process replies
