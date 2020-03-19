@@ -88,6 +88,12 @@ func (rf *Raft) GetState() (int, bool) {
 	return ct, s
 }
 
+func (rf *Raft) Convert2Follower(term int) {
+	rf.currentTerm = term
+	rf.state = Follower
+	rf.votesSoFar = 0
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -166,9 +172,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// a new term, I should vote, and revert to follower
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
-		rf.currentTerm = args.Term
-		rf.state = Follower
-		rf.votesSoFar = 0
+		rf.Convert2Follower(args.Term)
 	} else {
 		if rf.currentTerm > args.Term {
 			// invalid
@@ -179,9 +183,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			} else { // vote!
 				reply.VoteGranted = true
 				rf.votedFor = args.CandidateId
-				rf.currentTerm = args.Term
-				rf.state = Follower
-				rf.votesSoFar = 0
+				rf.Convert2Follower(args.Term)
 			}
 		}
 	}
@@ -198,9 +200,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf("[%d] Got heartbeat from server %d, my term is %d, theirs is %d\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
 	if args.Term >= rf.currentTerm {
 		reply.Success = true
-		rf.state = Follower
-		rf.votesSoFar = 0
-		rf.currentTerm = args.Term
+		rf.Convert2Follower(args.Term)
 		rf.lastHeardFromLeader = t
 		rf.votedFor = -1
 		DPrintf("[%d] Acked heartbeat, going back to follower\n", rf.me)
@@ -280,9 +280,7 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 		rf.mu.Lock()
 		DPrintf("Got false reply from server %d for leader %d, their term %d, my term %d, leader transition back to follower!\n",
 			server, rf.me, reply.Term, rf.currentTerm)
-		rf.state = Follower
-		rf.votesSoFar = 0
-		rf.currentTerm = reply.Term
+		rf.Convert2Follower(reply.Term)
 		rf.mu.Unlock()
 	}
 	return ok
