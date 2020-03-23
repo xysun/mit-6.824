@@ -105,6 +105,7 @@ func (rf *Raft) Convert2Follower(term int) {
 	rf.currentTerm = term
 	rf.state = Follower
 	rf.votesSoFar = 0
+	rf.lastHeardFromLeader = time.Now()
 }
 
 func (rf *Raft) PrintLogs() {
@@ -260,12 +261,19 @@ func min(a, b int) int {
 	return b
 }
 
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// if AppendEntries.term >= rf.currentTerm, reply true, transition to follower, update timestamp
 	// if not, reply false, continue
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	t := time.Now()
+
 	DPrintf("[%d] Got AppendEntries from server %d, my term is %d, theirs is %d, entries length %d\n",
 		rf.me, args.LeaderId, rf.currentTerm, args.Term, len(args.Entries))
 
@@ -278,8 +286,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term >= rf.currentTerm {
 		reply.Success = true
 		rf.Convert2Follower(args.Term)
-		rf.lastHeardFromLeader = t
+
 		rf.votedFor = -1
+	}
+
+	if len(rf.logs) <= args.PrevLogIndex || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+		DPrintf("[%d] PrevLogIndex does not match! my log length is %d, PrevLogIndex is %d",
+			rf.me, len(rf.logs), args.PrevLogIndex)
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
 	}
 
 	if len(args.Entries) == 0 {
@@ -295,14 +311,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		DPrintf("[%d] Acked heartbeat, going back to follower\n", rf.me)
-		return
-	}
-
-	if len(rf.logs) <= args.PrevLogIndex || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		DPrintf("[%d] PrevLogIndex does not match! my log length is %d, PrevLogIndex is %d",
-			rf.me, len(rf.logs), args.PrevLogIndex)
-		reply.Success = false
-		reply.Term = rf.currentTerm
 		return
 	}
 
@@ -410,7 +418,7 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 					rf.me, server, rf.nextIndex[server])
 				// TODO: decrease nextIndex and retry if we did send entries
 				if len(args.Entries) > 0 {
-					rf.nextIndex[server]--
+					rf.nextIndex[server] = max(1, rf.nextIndex[server]-1)
 					newArgs := args
 					newArgs.Entries = rf.logs[rf.nextIndex[server]:]
 					newArgs.PrevLogIndex = rf.nextIndex[server] - 1
@@ -565,39 +573,44 @@ func (rf *Raft) startElection() {
 	}
 }
 
+func sleepRandom() time.Duration {
+	electionTimeout := rand.Intn(800) + 200
+	electionTimeoutDuration := time.Duration(electionTimeout) * time.Millisecond
+	time.Sleep(electionTimeoutDuration)
+	return electionTimeoutDuration
+}
+
 func (rf *Raft) electionTick() {
 	// transition into candidate, if haven't heard from leader, AND you are a follower
 	DPrintf("[%d] Running election tick\n", rf.me)
 	// starts as follower, hence no heartbeat sent
 	// decides election timeout, [200,1000] ms; we will send heartbeat every 200ms
-	electionTimeout := rand.Intn(800) + 200
-	electionTimeoutDuration := time.Duration(electionTimeout) * time.Millisecond
-	DPrintf("[%d] Election timeout for is %d ms\n", rf.me, electionTimeout)
+
+	// DPrintf("[%d] Election timeout for is %d ms\n", rf.me, electionTimeout)
 	for !rf.killed() {
 		// sleep for a short while, 200 because we send heartbeat every 200ms
-
-		time.Sleep(electionTimeoutDuration)
+		d := sleepRandom()
 		t := time.Now()
 		rf.mu.Lock()
 
 		tdiff := t.Sub(rf.lastHeardFromLeader)
 		if rf.state == Follower {
-			DPrintf("[%d] It has been %d ms since last heard from leader, threshold is %d\n", rf.me, tdiff.Milliseconds(), electionTimeout)
+			DPrintf("[%d] It has been %d ms since last heard from leader, threshold is %d\n", rf.me, tdiff.Milliseconds(), d.Milliseconds())
 		}
 
-		if tdiff > electionTimeoutDuration && rf.state == Follower {
+		if tdiff > d && rf.state == Follower {
 
 			rf.state = Candidate
 			DPrintf("[%d] Server is transitioning into candidate!, from term %d \n", rf.me, rf.currentTerm)
 			rf.startElection()
 
-			time.Sleep(electionTimeoutDuration)
+			sleepRandom()
 			// am I leader yet?
 			rf.mu.Lock()
 			for rf.state == Candidate && rf.votesSoFar <= len(rf.peers)/2 { // i'm still a candidate with not enough votes; this means I didn't win the election, I also haven't acked a leader
 				DPrintf("[%d] Server does not have enough votes, start new election!\n", rf.me)
 				rf.startElection()
-				time.Sleep(electionTimeoutDuration)
+				sleepRandom()
 				rf.mu.Lock()
 			}
 			rf.mu.Unlock()
@@ -616,9 +629,9 @@ func (rf *Raft) heartbeatTick() {
 	// send heartbeat every 200ms, IIF server is leader
 	for !rf.killed() {
 		// heartbeat should start immediately
-		DPrintf("[%d] Initiating heartbeat tick \n", rf.me)
 		rf.mu.Lock()
 		if rf.state == Leader {
+			DPrintf("[%d] Initiating heartbeat tick \n", rf.me)
 			// Start a goroutine that send heartbeat and process replies
 			// Be careful of deadlock
 			argss := make([]AppendEntriesArgs, len(rf.peers))
@@ -627,6 +640,9 @@ func (rf *Raft) heartbeatTick() {
 				args.Term = rf.currentTerm
 				args.LeaderId = rf.me
 				args.LeaderCommitIdx = rf.commitIndex
+				// set prevLogIdx and prevLogTerm to be the committed term, to remove potentially bad ones
+				args.PrevLogIndex = rf.commitIndex
+				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 
 				argss[i] = args
 			}
