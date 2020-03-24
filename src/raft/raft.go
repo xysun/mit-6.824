@@ -82,11 +82,12 @@ type Raft struct {
 	votesSoFar          int
 
 	// 2B
-	logs        []Entry
-	commitIndex int
-	nextIndex   []int
-	matchIndex  []int
-	applyCh     chan ApplyMsg
+	logs            []Entry
+	commitIndex     int
+	nextIndex       []int
+	matchIndex      []int
+	applyCh         chan ApplyMsg
+	electionTimeout time.Duration
 }
 
 // return currentTerm and whether this server
@@ -225,7 +226,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = false
 		} else { // same term, have I voted?
 			// can we vote? check logs!
-			DPrintf("[%d] can I vote for server %d?\n", rf.me, args.CandidateId)
+			DPrintf("[%d] can I vote for server %d? args last term %d, last idx %d\n",
+				rf.me, args.CandidateId, args.LastLogTerm, args.LastLogIndex)
 			rf.PrintLogs()
 			myLastLogIdx := len(rf.logs) - 1
 			myLastLog := rf.logs[myLastLogIdx]
@@ -370,6 +372,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			DPrintf("[%d] Server asks server %d for a vote, result is %t\n", rf.me, server, reply.VoteGranted)
 			if reply.VoteGranted {
 				rf.mu.Lock()
+				DPrintf("[%d] got vote from %d, my state %s my current term %d, args term %d",
+					rf.me, server, rf.state, rf.currentTerm, args.Term)
 				// re-check assumption: i am still a candidate with same term
 				if rf.state == Candidate && rf.currentTerm == args.Term {
 					rf.votesSoFar++
@@ -402,13 +406,18 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	// if reply is false, transition back into follower (?)
-	if ok {
+	// check conditions: I am still a leader, and my term has not changed
+	rf.mu.Lock()
+	isLeader := rf.state == Leader
+	term := rf.currentTerm
+	rf.mu.Unlock()
+	if ok && isLeader && term == args.Term {
 		if !reply.Success {
 			rf.mu.Lock()
 			DPrintf("[%d] Leader Got false reply from server %d, their term %d, my term %d\n",
 				rf.me, server, reply.Term, rf.currentTerm)
 			if reply.Term > rf.currentTerm {
-				DPrintf("[%d] Leader Transition back to follower!", rf.me)
+				DPrintf("[%d] Leader Transition back to follower! New term %d", rf.me, reply.Term)
 				rf.Convert2Follower(reply.Term)
 				rf.mu.Unlock()
 			} else {
@@ -573,11 +582,12 @@ func (rf *Raft) startElection() {
 	}
 }
 
-func sleepRandom() time.Duration {
-	electionTimeout := rand.Intn(200) + 300
-	electionTimeoutDuration := time.Duration(electionTimeout) * time.Millisecond
-	time.Sleep(electionTimeoutDuration)
-	return electionTimeoutDuration
+func (rf *Raft) resetElectionTimeout() time.Duration {
+	rf.mu.Lock()
+	t := time.Duration(rand.Intn(200)+200) * time.Millisecond
+	rf.electionTimeout = t
+	rf.mu.Unlock()
+	return t
 }
 
 func (rf *Raft) electionTick() {
@@ -589,29 +599,32 @@ func (rf *Raft) electionTick() {
 	// DPrintf("[%d] Election timeout for is %d ms\n", rf.me, electionTimeout)
 	for !rf.killed() {
 		// sleep for a short while, 200 because we send heartbeat every 200ms
-		d := sleepRandom()
+		time.Sleep(20 * time.Millisecond)
 		t := time.Now()
 		rf.mu.Lock()
 
 		tdiff := t.Sub(rf.lastHeardFromLeader)
-		if rf.state == Follower {
-			DPrintf("[%d] It has been %d ms since last heard from leader, threshold is %d\n", rf.me, tdiff.Milliseconds(), d.Milliseconds())
-		}
+		// if rf.state == Follower {
+		// 	DPrintf("[%d] It has been %d ms since last heard from leader, threshold is %d\n", rf.me, tdiff.Milliseconds(), rf.electionTimeout.Milliseconds())
+		// }
 
-		if tdiff > d && rf.state == Follower {
+		if tdiff > rf.electionTimeout && rf.state == Follower {
 
 			rf.state = Candidate
+			DPrintf("[%d] It has been %d ms since last heard from leader, threshold is %d\n", rf.me, tdiff.Milliseconds(), rf.electionTimeout.Milliseconds())
 			DPrintf("[%d] Server is transitioning into candidate!, from term %d \n", rf.me, rf.currentTerm)
 			rf.startElection()
 
 			// randomize to avoid lockstep
-			time.Sleep(time.Duration(rand.Intn(1000)+600) * time.Millisecond)
+			d := rf.resetElectionTimeout()
+			time.Sleep(d)
 			// am I leader yet?
 			rf.mu.Lock()
 			for rf.state == Candidate && rf.votesSoFar <= len(rf.peers)/2 { // i'm still a candidate with not enough votes; this means I didn't win the election, I also haven't acked a leader
-				DPrintf("[%d] Server does not have enough votes, start new election!\n", rf.me)
+				DPrintf("[%d] Server does not have enough votes, start new election, current term %d!\n", rf.me, rf.currentTerm)
 				rf.startElection()
-				time.Sleep(time.Duration(rand.Intn(1000)+600) * time.Millisecond)
+				d = rf.resetElectionTimeout()
+				time.Sleep(d)
 				rf.mu.Lock()
 			}
 			rf.mu.Unlock()
@@ -659,7 +672,7 @@ func (rf *Raft) heartbeatTick() {
 		} else {
 			rf.mu.Unlock()
 		}
-		time.Sleep(time.Duration(200) * time.Millisecond)
+		time.Sleep(time.Duration(130) * time.Millisecond)
 	}
 }
 
@@ -696,6 +709,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.nextIndex[i] = 1
 	}
 	rf.applyCh = applyCh
+	rf.electionTimeout = time.Duration(rand.Intn(200)+200) * time.Millisecond
 
 	// start the infinite doing-work loop
 	go rf.electionTick()
