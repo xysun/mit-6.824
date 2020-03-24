@@ -584,7 +584,7 @@ func (rf *Raft) startElection() {
 
 func (rf *Raft) resetElectionTimeout() time.Duration {
 	rf.mu.Lock()
-	t := time.Duration(rand.Intn(200)+200) * time.Millisecond
+	t := time.Duration(rand.Intn(800)+200) * time.Millisecond
 	rf.electionTimeout = t
 	rf.mu.Unlock()
 	return t
