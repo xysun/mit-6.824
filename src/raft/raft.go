@@ -274,8 +274,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("[%d] Got AppendEntries from server %d, my term is %d, theirs is %d, entries length %d\n",
-		rf.me, args.LeaderId, rf.currentTerm, args.Term, len(args.Entries))
+	DPrintf("[%d] Got AppendEntries from server %d, my term is %d, theirs is %d, entries length %d, prev index %d",
+		rf.me, args.LeaderId, rf.currentTerm, args.Term, len(args.Entries), args.PrevLogIndex)
 
 	if args.Term < rf.currentTerm {
 		reply.Success = false
@@ -317,16 +317,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 
 	// starting from args.PrevLogIndex+1, loop through all entries, overwrite if does not match
-	for i, e := range args.Entries {
-		thisIdx := args.PrevLogIndex + 1 + i
-		if len(rf.logs) >= thisIdx+1 {
-			if rf.logs[thisIdx].Term != e.Term {
-				rf.logs[thisIdx] = e
-			}
-		} else {
-			rf.logs = append(rf.logs, e)
-		}
-	}
+	rf.logs = append(rf.logs[:args.PrevLogIndex+1], args.Entries...)
+	// for i, e := range args.Entries {
+	// 	thisIdx := args.PrevLogIndex + 1 + i
+	// 	if len(rf.logs) >= thisIdx+1 {
+	// 		if rf.logs[thisIdx].Term != e.Term {
+	// 			rf.logs[thisIdx] = e
+	// 		}
+	// 	} else {
+	// 		rf.logs = append(rf.logs, e)
+	// 	}
+	// }
 	rf.PrintLogs()
 
 	return
@@ -416,18 +417,16 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 			} else {
 				DPrintf("[%d] Received failed AppendEntry froms server %d because log inconsistency, next index is %d",
 					rf.me, server, rf.nextIndex[server])
-				// TODO: decrease nextIndex and retry if we did send entries
-				if len(args.Entries) > 0 {
-					rf.nextIndex[server] = max(1, rf.nextIndex[server]-1)
-					newArgs := args
-					newArgs.Entries = rf.logs[rf.nextIndex[server]:]
-					newArgs.PrevLogIndex = rf.nextIndex[server] - 1
-					newArgs.PrevLogTerm = rf.logs[newArgs.PrevLogIndex].Term
-					rf.mu.Unlock()
-					go rf.sendAppendEntry(server, newArgs, &AppendEntriesReply{})
-				} else {
-					rf.mu.Unlock()
-				}
+				// decrease nextIndex and retry
+				// this could also be from a heartbeat, so we want to fix before waiting for next command
+				rf.nextIndex[server] = max(1, rf.nextIndex[server]-1)
+				DPrintf("[%d] Leader dropping server %d next index to %d", rf.me, server, rf.nextIndex[server])
+				newArgs := args
+				newArgs.Entries = rf.logs[rf.nextIndex[server]:]
+				newArgs.PrevLogIndex = rf.nextIndex[server] - 1
+				newArgs.PrevLogTerm = rf.logs[newArgs.PrevLogIndex].Term
+				rf.mu.Unlock()
+				go rf.sendAppendEntry(server, newArgs, &AppendEntriesReply{})
 
 			}
 		} else {
@@ -436,8 +435,12 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 			// update matchIndex and nextIndex if there are entries
 			if len(args.Entries) > 0 {
 				rf.mu.Lock()
-				rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-				rf.nextIndex[server] = rf.matchIndex[server] + 1
+				// only increase matchIndex and nextIndex monotomically
+				if args.PrevLogIndex+len(args.Entries) > rf.matchIndex[server] {
+					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+					rf.nextIndex[server] = rf.matchIndex[server] + 1
+				}
+
 				DPrintf("[%d] next index for server %d is at %d", rf.me, server, rf.nextIndex[server])
 				// can we commit this entries?
 				n := rf.matchIndex[server]
@@ -513,7 +516,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 
 		// send AppendEntries RPC
-		DPrintf("[%d] Got command, sending AppendEntry", rf.me)
+		DPrintf("[%d] Got command, sending AppendEntry, prev log idx %d", rf.me, prevLogIdx)
 		rf.mu.Unlock()
 		for i := range rf.peers {
 			if i != rf.me { // rf.me won't change so no need to lock
@@ -587,6 +590,7 @@ func (rf *Raft) electionTick() {
 	// decides election timeout, [200,1000] ms; we will send heartbeat every 200ms
 
 	// DPrintf("[%d] Election timeout for is %d ms\n", rf.me, electionTimeout)
+	electionTimeout := time.Duration(800) * time.Millisecond
 	for !rf.killed() {
 		// sleep for a short while, 200 because we send heartbeat every 200ms
 		d := sleepRandom()
@@ -604,13 +608,13 @@ func (rf *Raft) electionTick() {
 			DPrintf("[%d] Server is transitioning into candidate!, from term %d \n", rf.me, rf.currentTerm)
 			rf.startElection()
 
-			sleepRandom()
+			time.Sleep(electionTimeout)
 			// am I leader yet?
 			rf.mu.Lock()
 			for rf.state == Candidate && rf.votesSoFar <= len(rf.peers)/2 { // i'm still a candidate with not enough votes; this means I didn't win the election, I also haven't acked a leader
 				DPrintf("[%d] Server does not have enough votes, start new election!\n", rf.me)
 				rf.startElection()
-				sleepRandom()
+				time.Sleep(electionTimeout)
 				rf.mu.Lock()
 			}
 			rf.mu.Unlock()
