@@ -110,7 +110,7 @@ func (rf *Raft) Convert2Follower(term int) {
 }
 
 func (rf *Raft) PrintLogs() {
-	// assuming have log
+	// assuming have lock
 	var s string = fmt.Sprintf("[%d] logs: ", rf.me)
 	for i, e := range rf.logs {
 		s += fmt.Sprintf("idx %d, Term %d, Command %s; ", i, e.Term, e.Command)
@@ -317,16 +317,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// starting from args.PrevLogIndex+1, loop through all entries, overwrite if does not match
 	rf.logs = append(rf.logs[:args.PrevLogIndex+1], args.Entries...)
-	// for i, e := range args.Entries {
-	// 	thisIdx := args.PrevLogIndex + 1 + i
-	// 	if len(rf.logs) >= thisIdx+1 {
-	// 		if rf.logs[thisIdx].Term != e.Term {
-	// 			rf.logs[thisIdx] = e
-	// 		}
-	// 	} else {
-	// 		rf.logs = append(rf.logs, e)
-	// 	}
-	// }
 	rf.PrintLogs()
 
 	return
@@ -448,7 +438,7 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 				}
 
 				DPrintf("[%d] next index for server %d is at %d", rf.me, server, rf.nextIndex[server])
-				// can we commit this entries?
+				// can we commit this entries? TODO: try from rf.commitIndex+1 until rf.matchIndex[server], backwards
 				n := rf.matchIndex[server]
 				if n > rf.commitIndex && rf.logs[n].Term == rf.currentTerm {
 					count := 1 // start with myself
@@ -461,7 +451,6 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 					}
 					if count > len(rf.peers)/2 {
 						DPrintf("[%d] Leader setting commit index to %d\n", rf.me, n)
-						// TODO send ApplyMsg for commitIndex up to n
 						for i := rf.commitIndex + 1; i <= n; i++ {
 							rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: i, Command: rf.logs[i].Command}
 						}
@@ -497,7 +486,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	// not killed
 	rf.mu.Lock()
-	// defer rf.mu.Unlock()
 	term := rf.currentTerm
 	isLeader := rf.state == Leader
 
@@ -505,21 +493,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		thisEntry := Entry{Term: rf.currentTerm, Command: command}
 		prevLogIdx := len(rf.logs) - 1
 		rf.logs = append(rf.logs, thisEntry)
-		argss := make([]AppendEntriesArgs, len(rf.peers))
 
-		for i := range rf.peers {
-			args := AppendEntriesArgs{}
-			args.Term = rf.currentTerm
-			args.LeaderId = rf.me
-			args.PrevLogIndex = prevLogIdx
-			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
-			args.LeaderCommitIdx = rf.commitIndex
+		args := AppendEntriesArgs{}
+		args.Term = rf.currentTerm
+		args.LeaderId = rf.me
+		args.PrevLogIndex = prevLogIdx
+		args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+		args.LeaderCommitIdx = rf.commitIndex
 
-			// for each server, send this entry
-			args.Entries = []Entry{thisEntry}
-
-			argss[i] = args
-		}
+		// for each server, send this entry
+		args.Entries = []Entry{thisEntry}
 
 		// send AppendEntries RPC
 		DPrintf("[%d] Got command, sending AppendEntry, prev log idx %d", rf.me, prevLogIdx)
@@ -527,7 +510,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		for i := range rf.peers {
 			if i != rf.me { // rf.me won't change so no need to lock
 
-				go rf.sendAppendEntry(i, &argss[i], &AppendEntriesReply{})
+				go rf.sendAppendEntry(i, &args, &AppendEntriesReply{})
 			}
 		}
 
@@ -584,7 +567,7 @@ func (rf *Raft) startElection() {
 
 func (rf *Raft) resetElectionTimeout() time.Duration {
 	rf.mu.Lock()
-	t := time.Duration(rand.Intn(800)+200) * time.Millisecond
+	t := time.Duration(rand.Intn(400)+400) * time.Millisecond
 	rf.electionTimeout = t
 	rf.mu.Unlock()
 	return t
@@ -648,25 +631,20 @@ func (rf *Raft) heartbeatTick() {
 			DPrintf("[%d] Initiating heartbeat tick \n", rf.me)
 			// Start a goroutine that send heartbeat and process replies
 			// Be careful of deadlock
-			argss := make([]AppendEntriesArgs, len(rf.peers))
-			for i := range rf.peers {
-				args := AppendEntriesArgs{}
-				args.Term = rf.currentTerm
-				args.LeaderId = rf.me
-				args.LeaderCommitIdx = rf.commitIndex
-				// set prevLogIdx and prevLogTerm to be the committed term, to remove potentially bad ones
-				args.PrevLogIndex = rf.commitIndex
-				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
-
-				argss[i] = args
-			}
+			args := AppendEntriesArgs{}
+			args.Term = rf.currentTerm
+			args.LeaderId = rf.me
+			args.LeaderCommitIdx = rf.commitIndex
+			// set prevLogIdx and prevLogTerm to be the committed term, to remove potentially bad ones
+			args.PrevLogIndex = rf.commitIndex
+			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 
 			// TODO: send entries maybe
 			rf.mu.Unlock()
 			for i := range rf.peers {
 				if i != rf.me { // rf.me won't change so no need to lock
 
-					go rf.sendAppendEntry(i, &argss[i], &AppendEntriesReply{})
+					go rf.sendAppendEntry(i, &args, &AppendEntriesReply{})
 				}
 			}
 		} else {
