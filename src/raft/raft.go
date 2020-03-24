@@ -224,29 +224,26 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			// invalid
 			reply.VoteGranted = false
 		} else { // same term, have I voted?
-			if rf.votedFor != -1 {
+			// can we vote? check logs!
+			DPrintf("[%d] can I vote for server %d?\n", rf.me, args.CandidateId)
+			rf.PrintLogs()
+			myLastLogIdx := len(rf.logs) - 1
+			myLastLog := rf.logs[myLastLogIdx]
+
+			if myLastLog.Term > args.LastLogTerm {
+				DPrintf("[%d] I have a last log with higher term!", rf.me)
 				reply.VoteGranted = false
 			} else {
-				// can we vote? check logs!
-				DPrintf("[%d] can I vote for server %d?\n", rf.me, args.CandidateId)
-				rf.PrintLogs()
-				myLastLogIdx := len(rf.logs) - 1
-				myLastLog := rf.logs[myLastLogIdx]
-
-				if myLastLog.Term > args.LastLogTerm {
-					DPrintf("[%d] I have a last log with higher term!", rf.me)
+				if myLastLog.Term == args.LastLogTerm && myLastLogIdx > args.LastLogIndex {
+					DPrintf("[%d] I have a longer log!", rf.me)
 					reply.VoteGranted = false
 				} else {
-					if myLastLog.Term == args.LastLogTerm && myLastLogIdx > args.LastLogIndex {
-						DPrintf("[%d] I have a longer log!", rf.me)
-						reply.VoteGranted = false
-					} else {
-						reply.VoteGranted = true
-						rf.votedFor = args.CandidateId
-						rf.Convert2Follower(args.Term)
-					}
+					reply.VoteGranted = true
+					rf.votedFor = args.CandidateId
+					rf.Convert2Follower(args.Term)
 				}
 			}
+
 		}
 	}
 
@@ -577,7 +574,7 @@ func (rf *Raft) startElection() {
 }
 
 func sleepRandom() time.Duration {
-	electionTimeout := rand.Intn(800) + 200
+	electionTimeout := rand.Intn(200) + 300
 	electionTimeoutDuration := time.Duration(electionTimeout) * time.Millisecond
 	time.Sleep(electionTimeoutDuration)
 	return electionTimeoutDuration
@@ -590,7 +587,6 @@ func (rf *Raft) electionTick() {
 	// decides election timeout, [200,1000] ms; we will send heartbeat every 200ms
 
 	// DPrintf("[%d] Election timeout for is %d ms\n", rf.me, electionTimeout)
-	electionTimeout := time.Duration(800) * time.Millisecond
 	for !rf.killed() {
 		// sleep for a short while, 200 because we send heartbeat every 200ms
 		d := sleepRandom()
@@ -608,13 +604,14 @@ func (rf *Raft) electionTick() {
 			DPrintf("[%d] Server is transitioning into candidate!, from term %d \n", rf.me, rf.currentTerm)
 			rf.startElection()
 
-			time.Sleep(electionTimeout)
+			// randomize to avoid lockstep
+			time.Sleep(time.Duration(rand.Intn(1000)+600) * time.Millisecond)
 			// am I leader yet?
 			rf.mu.Lock()
 			for rf.state == Candidate && rf.votesSoFar <= len(rf.peers)/2 { // i'm still a candidate with not enough votes; this means I didn't win the election, I also haven't acked a leader
 				DPrintf("[%d] Server does not have enough votes, start new election!\n", rf.me)
 				rf.startElection()
-				time.Sleep(electionTimeout)
+				time.Sleep(time.Duration(rand.Intn(1000)+600) * time.Millisecond)
 				rf.mu.Lock()
 			}
 			rf.mu.Unlock()
