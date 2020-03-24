@@ -199,6 +199,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	reply.Term = rf.currentTerm
 	if args.Term > rf.currentTerm {
 		// a new term, I should vote, and revert to follower, check logs!
 		DPrintf("[%d] can I vote for server %d?\n", rf.me, args.CandidateId)
@@ -224,7 +225,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.currentTerm > args.Term {
 			// invalid
 			reply.VoteGranted = false
-		} else { // same term, have I voted?
+			// reply.Term = rf.currentTerm
+		} else { // same term, have I voted? TODO: bug? only vote once in a term
 			// can we vote? check logs!
 			DPrintf("[%d] can I vote for server %d? args last term %d, last idx %d\n",
 				rf.me, args.CandidateId, args.LastLogTerm, args.LastLogIndex)
@@ -382,6 +384,15 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 					}
 				}
 				rf.mu.Unlock()
+			} else {
+				// update myself if reply.Term > rf.currentTerm; make sure i am still a candidate
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm && rf.state == Candidate {
+					DPrintf("[%d] request vote reply from %d has a higher term, their term %d, my term %d, reverting back to follower...",
+						rf.me, server, args.Term, rf.currentTerm)
+					rf.Convert2Follower(reply.Term)
+				}
+				rf.mu.Unlock()
 			}
 		}
 		return ok
@@ -439,22 +450,24 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 
 				DPrintf("[%d] next index for server %d is at %d", rf.me, server, rf.nextIndex[server])
 				// can we commit this entries? TODO: try from rf.commitIndex+1 until rf.matchIndex[server], backwards
-				n := rf.matchIndex[server]
-				if n > rf.commitIndex && rf.logs[n].Term == rf.currentTerm {
-					count := 1 // start with myself
-					for i := range rf.peers {
-						if i != rf.me {
-							if rf.matchIndex[i] >= n {
-								count++
+				for n := rf.matchIndex[server]; n > rf.commitIndex; n-- {
+					if rf.logs[n].Term == rf.currentTerm {
+						count := 1 // start with myself
+						for i := range rf.peers {
+							if i != rf.me {
+								if rf.matchIndex[i] >= n {
+									count++
+								}
 							}
 						}
-					}
-					if count > len(rf.peers)/2 {
-						DPrintf("[%d] Leader setting commit index to %d\n", rf.me, n)
-						for i := rf.commitIndex + 1; i <= n; i++ {
-							rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: i, Command: rf.logs[i].Command}
+						if count > len(rf.peers)/2 {
+							DPrintf("[%d] Leader setting commit index to %d\n", rf.me, n)
+							for i := rf.commitIndex + 1; i <= n; i++ {
+								rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: i, Command: rf.logs[i].Command}
+							}
+							rf.commitIndex = n
+							break
 						}
-						rf.commitIndex = n
 					}
 				}
 				rf.mu.Unlock()
