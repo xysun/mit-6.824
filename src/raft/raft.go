@@ -167,8 +167,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term            int
+	Success         bool
+	ConflictFromIdx int
 }
 
 //
@@ -296,6 +297,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.me, len(rf.logs), args.PrevLogIndex)
 		reply.Success = false
 		reply.Term = rf.currentTerm
+		// from https://github.com/stardust95/MIT6.824/blob/master/src/raft/raft.go#L269
+		if len(rf.logs) > args.PrevLogIndex {
+			conflictTerm := rf.logs[args.PrevLogIndex].Term
+			i := args.PrevLogIndex
+			for ; i > 0; i-- {
+				if rf.logs[i].Term != conflictTerm {
+					break
+				}
+			}
+			reply.ConflictFromIdx = i + 1
+		} else {
+			reply.ConflictFromIdx = len(rf.logs)
+		}
 		return
 	}
 
@@ -422,11 +436,12 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 				rf.Convert2Follower(reply.Term)
 				rf.mu.Unlock()
 			} else {
-				DPrintf("[%d] Received failed AppendEntry froms server %d because log inconsistency, next index is %d",
-					rf.me, server, rf.nextIndex[server])
+				DPrintf("[%d] Received failed AppendEntry froms server %d because log inconsistency, next index is %d, matched index is %d",
+					rf.me, server, rf.nextIndex[server], rf.matchIndex[server])
 				// decrease nextIndex and retry
 				// this could also be from a heartbeat, so we want to fix before waiting for next command
-				rf.nextIndex[server] = max(1, rf.nextIndex[server]-1)
+				rf.nextIndex[server] = reply.ConflictFromIdx
+				// rf.nextIndex[server] = max(1, rf.nextIndex[server]-1)
 				DPrintf("[%d] Leader dropping server %d next index to %d", rf.me, server, rf.nextIndex[server])
 				entries := rf.logs[rf.nextIndex[server]:]
 				prevLogIdx := rf.nextIndex[server] - 1
@@ -634,7 +649,7 @@ func (rf *Raft) electionTick() {
 			rf.mu.Unlock()
 
 		} else {
-			DPrintf("[%d] Server has recently heard from leader or is not a follower, do nothing...\n", rf.me)
+			// DPrintf("[%d] Server has recently heard from leader or is not a follower, do nothing...\n", rf.me)
 			rf.mu.Unlock()
 		}
 
@@ -671,7 +686,7 @@ func (rf *Raft) heartbeatTick() {
 		} else {
 			rf.mu.Unlock()
 		}
-		time.Sleep(time.Duration(130) * time.Millisecond)
+		time.Sleep(time.Duration(200) * time.Millisecond)
 	}
 }
 
