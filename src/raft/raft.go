@@ -331,8 +331,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 
-	// starting from args.PrevLogIndex+1, loop through all entries, overwrite if does not match
-	rf.logs = append(rf.logs[:args.PrevLogIndex+1], args.Entries...)
+	// If an existing entry conflicts with a new one (same index
+	// but different terms), delete the existing entry and all that
+	// follow it (§5.3) Append any new entries not already in the log
+	// make sure we do NOT delete perfectly good ones (because RPC can arrive out of order)
+	i := 0
+	for ; i < len(args.Entries); i++ {
+		thisIdx := args.PrevLogIndex + i + 1
+		if thisIdx >= len(rf.logs) {
+			break
+		}
+		if rf.logs[thisIdx].Term != args.Entries[i].Term {
+			rf.logs = rf.logs[:thisIdx]
+			break
+		}
+	}
+	if i < len(args.Entries) {
+		rf.logs = append(rf.logs, args.Entries[i:]...)
+	}
+
 	rf.PrintLogs()
 
 	return
@@ -438,25 +455,30 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 			} else {
 				DPrintf("[%d] Received failed AppendEntry froms server %d because log inconsistency, next index is %d, matched index is %d",
 					rf.me, server, rf.nextIndex[server], rf.matchIndex[server])
-				// decrease nextIndex and retry
-				// this could also be from a heartbeat, so we want to fix before waiting for next command
-				rf.nextIndex[server] = reply.ConflictFromIdx
-				// rf.nextIndex[server] = max(1, rf.nextIndex[server]-1)
-				DPrintf("[%d] Leader dropping server %d next index to %d", rf.me, server, rf.nextIndex[server])
-				entries := rf.logs[rf.nextIndex[server]:]
-				prevLogIdx := rf.nextIndex[server] - 1
 
-				// IMPORTANT: we have to create a new obj to avoid data race
-				newArgs := AppendEntriesArgs{
-					Term:            rf.currentTerm,
-					LeaderId:        rf.me,
-					PrevLogIndex:    prevLogIdx,
-					PrevLogTerm:     rf.logs[prevLogIdx].Term,
-					LeaderCommitIdx: rf.commitIndex,
-					Entries:         entries}
+				if reply.ConflictFromIdx < rf.matchIndex[server] && rf.matchIndex[server] == len(rf.logs)-1 {
+					// if we've already replicated all of logs, this failed response is outdated, do nothing
+					rf.mu.Unlock()
+				} else {
+					// decrease nextIndex and retry
+					// this could also be from a heartbeat, so we want to fix before waiting for next command
+					rf.nextIndex[server] = reply.ConflictFromIdx
+					DPrintf("[%d] Leader dropping server %d next index to %d", rf.me, server, rf.nextIndex[server])
+					entries := rf.logs[rf.nextIndex[server]:]
+					prevLogIdx := rf.nextIndex[server] - 1
 
-				rf.mu.Unlock()
-				go rf.sendAppendEntry(server, &newArgs, &AppendEntriesReply{})
+					// IMPORTANT: we have to create a new obj to avoid data race
+					newArgs := AppendEntriesArgs{
+						Term:            rf.currentTerm,
+						LeaderId:        rf.me,
+						PrevLogIndex:    prevLogIdx,
+						PrevLogTerm:     rf.logs[prevLogIdx].Term,
+						LeaderCommitIdx: rf.commitIndex,
+						Entries:         entries}
+
+					rf.mu.Unlock()
+					go rf.sendAppendEntry(server, &newArgs, &AppendEntriesReply{})
+				}
 
 			}
 		} else {
@@ -466,10 +488,8 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 			if len(args.Entries) > 0 {
 				rf.mu.Lock()
 				// only increase matchIndex and nextIndex monotomically
-				if args.PrevLogIndex+len(args.Entries) > rf.matchIndex[server] {
-					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-					rf.nextIndex[server] = rf.matchIndex[server] + 1
-				}
+				rf.matchIndex[server] = max(rf.matchIndex[server], args.PrevLogIndex+len(args.Entries))
+				rf.nextIndex[server] = max(rf.nextIndex[server], rf.matchIndex[server]+1)
 
 				DPrintf("[%d] next index for server %d is at %d", rf.me, server, rf.nextIndex[server])
 				// can we commit this entries? TODO: try from rf.commitIndex+1 until rf.matchIndex[server], backwards
