@@ -428,12 +428,20 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 				// this could also be from a heartbeat, so we want to fix before waiting for next command
 				rf.nextIndex[server] = max(1, rf.nextIndex[server]-1)
 				DPrintf("[%d] Leader dropping server %d next index to %d", rf.me, server, rf.nextIndex[server])
-				newArgs := args
-				newArgs.Entries = rf.logs[rf.nextIndex[server]:]
-				newArgs.PrevLogIndex = rf.nextIndex[server] - 1
-				newArgs.PrevLogTerm = rf.logs[newArgs.PrevLogIndex].Term
+				entries := rf.logs[rf.nextIndex[server]:]
+				prevLogIdx := rf.nextIndex[server] - 1
+
+				// IMPORTANT: we have to create a new obj to avoid data race
+				newArgs := AppendEntriesArgs{
+					Term:            rf.currentTerm,
+					LeaderId:        rf.me,
+					PrevLogIndex:    prevLogIdx,
+					PrevLogTerm:     rf.logs[prevLogIdx].Term,
+					LeaderCommitIdx: rf.commitIndex,
+					Entries:         entries}
+
 				rf.mu.Unlock()
-				go rf.sendAppendEntry(server, newArgs, &AppendEntriesReply{})
+				go rf.sendAppendEntry(server, &newArgs, &AppendEntriesReply{})
 
 			}
 		} else {
