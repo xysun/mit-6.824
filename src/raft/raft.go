@@ -201,8 +201,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	reply.Term = rf.currentTerm
-	if args.Term > rf.currentTerm {
-		// a new term, I should vote, and revert to follower, check logs!
+	if rf.currentTerm > args.Term {
+		reply.VoteGranted = false
+	} else {
+		// TODO: we are not doing the "vote only once per term" as per paper though
+		// however if we do that we fail the Backup test though
 		DPrintf("[%d] can I vote for server %d?\n", rf.me, args.CandidateId)
 		rf.PrintLogs()
 		myLastLogIdx := len(rf.logs) - 1
@@ -220,35 +223,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				rf.votedFor = args.CandidateId
 				rf.Convert2Follower(args.Term)
 			}
-		}
-
-	} else {
-		if rf.currentTerm > args.Term {
-			// invalid
-			reply.VoteGranted = false
-			// reply.Term = rf.currentTerm
-		} else { // same term, have I voted? TODO: bug? only vote once in a term
-			// can we vote? check logs!
-			DPrintf("[%d] can I vote for server %d? args last term %d, last idx %d\n",
-				rf.me, args.CandidateId, args.LastLogTerm, args.LastLogIndex)
-			rf.PrintLogs()
-			myLastLogIdx := len(rf.logs) - 1
-			myLastLog := rf.logs[myLastLogIdx]
-
-			if myLastLog.Term > args.LastLogTerm {
-				DPrintf("[%d] I have a last log with higher term!", rf.me)
-				reply.VoteGranted = false
-			} else {
-				if myLastLog.Term == args.LastLogTerm && myLastLogIdx > args.LastLogIndex {
-					DPrintf("[%d] I have a longer log!", rf.me)
-					reply.VoteGranted = false
-				} else {
-					reply.VoteGranted = true
-					rf.votedFor = args.CandidateId
-					rf.Convert2Follower(args.Term)
-				}
-			}
-
 		}
 	}
 
@@ -492,7 +466,7 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 				rf.nextIndex[server] = max(rf.nextIndex[server], rf.matchIndex[server]+1)
 
 				DPrintf("[%d] next index for server %d is at %d", rf.me, server, rf.nextIndex[server])
-				// can we commit this entries? TODO: try from rf.commitIndex+1 until rf.matchIndex[server], backwards
+				// can we commit this entries? try from rf.commitIndex+1 until rf.matchIndex[server], backwards
 				for n := rf.matchIndex[server]; n > rf.commitIndex; n-- {
 					if rf.logs[n].Term == rf.currentTerm {
 						count := 1 // start with myself
@@ -706,7 +680,7 @@ func (rf *Raft) heartbeatTick() {
 		} else {
 			rf.mu.Unlock()
 		}
-		time.Sleep(time.Duration(200) * time.Millisecond)
+		time.Sleep(time.Duration(150) * time.Millisecond)
 	}
 }
 
