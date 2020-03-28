@@ -201,9 +201,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	reply.Term = rf.currentTerm
-	if rf.currentTerm > args.Term {
+	if rf.currentTerm > args.Term || (rf.currentTerm == args.Term && rf.votedFor != -1 && rf.state == Follower) {
 		reply.VoteGranted = false
+		if rf.currentTerm == args.Term && rf.votedFor != -1 {
+			DPrintf("[%d] I am asked to vote for term %d server %d, I am a follower and already voted for %d", rf.me, args.Term, args.CandidateId, rf.votedFor)
+		}
 	} else {
+
+		if rf.currentTerm == args.Term && rf.state == Candidate {
+			DPrintf("[%d] I am asked to vote for term %d server %d, I am a candidate yet I will revote", rf.me, args.Term, args.CandidateId)
+		}
+
 		// TODO: we are not doing the "vote only once per term" as per paper though
 		// however if we do that we fail the Backup test though
 		DPrintf("[%d] can I vote for server %d?\n", rf.me, args.CandidateId)
