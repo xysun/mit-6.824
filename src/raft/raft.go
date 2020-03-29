@@ -18,12 +18,15 @@ package raft
 //
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"../labgob"
 	"../labrpc"
 )
 
@@ -133,14 +136,24 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	// assume we have lock
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+	// DPrintf("[%d] persisted", rf.me)
 }
 
 //
 // restore previously persisted state.
 //
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte) error {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
+		return nil
 	}
 	// Your code here (2C).
 	// Example:
@@ -155,6 +168,24 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var logs []Entry
+	var currentTerm int
+	var votedFor int
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		return errors.New("Failed to decode")
+	} else {
+		rf.logs = logs
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		DPrintf("[%d] after reading persist...currentTerm %d, votedFor %d", rf.me, rf.currentTerm, rf.votedFor)
+		rf.PrintLogs()
+
+		return nil
+	}
+
 }
 
 type AppendEntriesArgs struct {
@@ -218,7 +249,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.PrintLogs()
 		myLastLogIdx := len(rf.logs) - 1
 		myLastLog := rf.logs[myLastLogIdx]
-
+		rf.currentTerm = args.Term // to prevent lockstep (i.e. when I am a few terms behind)
 		if myLastLog.Term > args.LastLogTerm {
 			DPrintf("[%d] I have a last log with higher term!", rf.me)
 			reply.VoteGranted = false
@@ -230,8 +261,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				reply.VoteGranted = true
 				rf.votedFor = args.CandidateId
 				rf.Convert2Follower(args.Term)
+
 			}
 		}
+		rf.persist()
 	}
 
 	rf.mu.Unlock()
@@ -270,9 +303,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term >= rf.currentTerm {
 		reply.Success = true
 		rf.Convert2Follower(args.Term)
-
-		rf.votedFor = -1
 	}
+	if args.Term > rf.currentTerm {
+		rf.votedFor = -1 // otherwise retain my vote for current term
+	}
+	rf.persist()
 
 	if len(rf.logs) <= args.PrevLogIndex || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		DPrintf("[%d] PrevLogIndex does not match! my log length is %d, PrevLogIndex is %d",
@@ -331,6 +366,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if i < len(args.Entries) {
 		rf.logs = append(rf.logs, args.Entries[i:]...)
 	}
+	rf.persist()
 
 	rf.PrintLogs()
 
@@ -386,7 +422,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 						// majority, i am a leader now!
 						DPrintf("[%d] Server is a leader now!\n", rf.me)
 						rf.state = Leader
-						rf.votesSoFar = 0
+						// rf.votesSoFar = 0
+						// rf.votedFor = -1
+						rf.persist()
 						rf.nextIndex = make([]int, len(rf.peers))
 						rf.matchIndex = make([]int, len(rf.peers))
 						nextIdx := len(rf.logs)
@@ -404,6 +442,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 					DPrintf("[%d] request vote reply from %d has a higher term, their term %d, my term %d, reverting back to follower...",
 						rf.me, server, args.Term, rf.currentTerm)
 					rf.Convert2Follower(reply.Term)
+					rf.persist()
 				}
 				rf.mu.Unlock()
 			}
@@ -433,6 +472,7 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 			if reply.Term > rf.currentTerm {
 				DPrintf("[%d] Leader Transition back to follower! New term %d", rf.me, reply.Term)
 				rf.Convert2Follower(reply.Term)
+				rf.persist()
 				rf.mu.Unlock()
 			} else {
 				DPrintf("[%d] Received failed AppendEntry froms server %d because log inconsistency, next index is %d, matched index is %d",
@@ -544,6 +584,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 		// send AppendEntries RPC
 		DPrintf("[%d] Got command, sending AppendEntry, prev log idx %d", rf.me, prevLogIdx)
+		rf.persist()
 		rf.mu.Unlock()
 		for i := range rf.peers {
 			if i != rf.me { // rf.me won't change so no need to lock
@@ -595,6 +636,8 @@ func (rf *Raft) startElection() {
 	args.LastLogIndex = len(rf.logs) - 1
 	args.LastLogTerm = rf.logs[args.LastLogIndex].Term
 
+	rf.persist()
+
 	rf.mu.Unlock()
 	for i := range rf.peers {
 		if i != rf.me {
@@ -605,7 +648,8 @@ func (rf *Raft) startElection() {
 
 func (rf *Raft) resetElectionTimeout() time.Duration {
 	rf.mu.Lock()
-	t := time.Duration(rand.Intn(400)+400) * time.Millisecond
+	t := time.Duration(rand.Intn(1200)+200) * time.Millisecond
+	DPrintf("[%d] election timeout reset to %d", rf.me, t.Milliseconds())
 	rf.electionTimeout = t
 	rf.mu.Unlock()
 	return t
@@ -677,7 +721,10 @@ func (rf *Raft) heartbeatTick() {
 			args.PrevLogIndex = rf.commitIndex
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 
-			// TODO: send entries maybe
+			// send entries
+			if rf.commitIndex < len(rf.logs)-1 {
+				args.Entries = rf.logs[rf.commitIndex+1:]
+			}
 			rf.mu.Unlock()
 			for i := range rf.peers {
 				if i != rf.me { // rf.me won't change so no need to lock
@@ -714,8 +761,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.votesSoFar = 0
-	rf.state = Follower // start as follower
-	rf.lastHeardFromLeader = time.Now().Add(-1 * time.Hour)
+	rf.state = Follower                 // start as follower
+	rf.lastHeardFromLeader = time.Now() //.Add(-1 * time.Hour) // to prevent both start as candidate
 	// 2B
 	rf.commitIndex = 0
 	rf.logs = []Entry{Entry{Term: 0}}
@@ -725,13 +772,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.nextIndex[i] = 1
 	}
 	rf.applyCh = applyCh
-	rf.electionTimeout = time.Duration(rand.Intn(200)+200) * time.Millisecond
-
-	// start the infinite doing-work loop
-	go rf.electionTick()
+	rf.electionTimeout = time.Duration(rand.Intn(400)+200) * time.Millisecond
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	err := rf.readPersist(persister.ReadRaftState())
+	if err == nil {
+		// start the infinite doing-work loop
+		go rf.electionTick()
 
-	return rf
+		return rf
+	} else {
+		DPrintf("Error in read persist! %s", err.Error())
+		return rf
+	}
+
 }
