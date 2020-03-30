@@ -198,9 +198,11 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term            int
-	Success         bool
-	ConflictFromIdx int
+	Term    int
+	Success bool
+	XTerm   int
+	XIndex  int
+	XLen    int
 }
 
 //
@@ -232,19 +234,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	reply.Term = rf.currentTerm
-	if rf.currentTerm > args.Term || (rf.currentTerm == args.Term && rf.votedFor != -1 && rf.state == Follower) {
+	if rf.currentTerm > args.Term || (rf.currentTerm == args.Term && rf.votedFor != -1) {
 		reply.VoteGranted = false
-		if rf.currentTerm == args.Term && rf.votedFor != -1 {
-			DPrintf("[%d] I am asked to vote for term %d server %d, I am a follower and already voted for %d", rf.me, args.Term, args.CandidateId, rf.votedFor)
-		}
 	} else {
 
-		if rf.currentTerm == args.Term && rf.state == Candidate {
-			DPrintf("[%d] I am asked to vote for term %d server %d, I am a candidate yet I will revote", rf.me, args.Term, args.CandidateId)
-		}
-
-		// TODO: we are not doing the "vote only once per term" as per paper though
-		// however if we do that we fail the Backup test though
 		DPrintf("[%d] can I vote for server %d?\n", rf.me, args.CandidateId)
 		rf.PrintLogs()
 		myLastLogIdx := len(rf.logs) - 1
@@ -291,6 +284,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	reply.XLen = len(rf.logs)
+
 	DPrintf("[%d] Got AppendEntries from server %d, my term is %d, theirs is %d, entries length %d, prev index %d",
 		rf.me, args.LeaderId, rf.currentTerm, args.Term, len(args.Entries), args.PrevLogIndex)
 
@@ -316,16 +311,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		// from https://github.com/stardust95/MIT6.824/blob/master/src/raft/raft.go#L269
 		if len(rf.logs) > args.PrevLogIndex {
-			conflictTerm := rf.logs[args.PrevLogIndex].Term
+			reply.XTerm = rf.logs[args.PrevLogIndex].Term
 			i := args.PrevLogIndex
 			for ; i > 0; i-- {
-				if rf.logs[i].Term != conflictTerm {
+				if rf.logs[i].Term != reply.XTerm {
 					break
 				}
 			}
-			reply.ConflictFromIdx = i + 1
+			reply.XIndex = i + 1
 		} else {
-			reply.ConflictFromIdx = len(rf.logs)
+			reply.XTerm = -1
+			reply.XIndex = -1
 		}
 		return
 	}
@@ -463,10 +459,8 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 	rf.mu.Lock()
 	isLeader := rf.state == Leader
 	term := rf.currentTerm
-	rf.mu.Unlock()
 	if ok && isLeader && term == args.Term {
 		if !reply.Success {
-			rf.mu.Lock()
 			DPrintf("[%d] Leader Got false reply from server %d, their term %d, my term %d\n",
 				rf.me, server, reply.Term, rf.currentTerm)
 			if reply.Term > rf.currentTerm {
@@ -478,16 +472,39 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 				DPrintf("[%d] Received failed AppendEntry froms server %d because log inconsistency, next index is %d, matched index is %d",
 					rf.me, server, rf.nextIndex[server], rf.matchIndex[server])
 
-				if reply.ConflictFromIdx < rf.matchIndex[server] && rf.matchIndex[server] == len(rf.logs)-1 {
+				if reply.XIndex < rf.matchIndex[server] && rf.matchIndex[server] == len(rf.logs)-1 {
 					// if we've already replicated all of logs, this failed response is outdated, do nothing
 					rf.mu.Unlock()
 				} else {
 					// decrease nextIndex and retry
 					// this could also be from a heartbeat, so we want to fix before waiting for next command
-					rf.nextIndex[server] = reply.ConflictFromIdx
+					if reply.XIndex == -1 {
+						rf.nextIndex[server] = reply.XLen
+					} else {
+						// does leader have XTerm?
+						var leaderHasXTerm = false
+						i := len(rf.logs) - 1
+						for i >= 0 {
+							if rf.logs[i].Term == reply.XTerm {
+								leaderHasXTerm = true
+								break
+							}
+							i--
+						}
+
+						if leaderHasXTerm {
+							// i is last index of this term
+							rf.nextIndex[server] = i + 1
+						} else {
+							rf.nextIndex[server] = reply.XIndex
+						}
+					}
 					DPrintf("[%d] Leader dropping server %d next index to %d", rf.me, server, rf.nextIndex[server])
 					entries := rf.logs[rf.nextIndex[server]:]
 					prevLogIdx := rf.nextIndex[server] - 1
+					if prevLogIdx < 0 {
+						DPrintf("reply.XTerm: %d, XIndex: %d, XLen: %d", reply.XTerm, reply.XIndex, reply.XLen)
+					}
 
 					// IMPORTANT: we have to create a new obj to avoid data race
 					newArgs := AppendEntriesArgs{
@@ -508,7 +525,7 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 			DPrintf("[%d] Received success AppendEntry reply from server %d", rf.me, server)
 			// update matchIndex and nextIndex if there are entries
 			if len(args.Entries) > 0 {
-				rf.mu.Lock()
+
 				// only increase matchIndex and nextIndex monotomically
 				rf.matchIndex[server] = max(rf.matchIndex[server], args.PrevLogIndex+len(args.Entries))
 				rf.nextIndex[server] = max(rf.nextIndex[server], rf.matchIndex[server]+1)
@@ -536,9 +553,13 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntriesArgs, reply *Appe
 					}
 				}
 				rf.mu.Unlock()
+			} else {
+				rf.mu.Unlock()
 			}
 
 		}
+	} else {
+		rf.mu.Unlock()
 	}
 	return ok
 }
