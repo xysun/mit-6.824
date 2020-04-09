@@ -1,15 +1,16 @@
 package kvraft
 
 import (
-	"../labgob"
-	"../labrpc"
 	"log"
-	"../raft"
 	"sync"
 	"sync/atomic"
+
+	"../labgob"
+	"../labrpc"
+	"../raft"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -18,11 +19,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Key   string
+	Value string
+	Op    string // GET/PUT/APPEND
 }
 
 type KVServer struct {
@@ -35,15 +38,60 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	// KV map
+	store map[string]string
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	// return current `store`? or we should commit a Get first
+	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get"})
+	if isLeader {
+
+		// wait on applyCh; note you may not receive the msg you want?
+		// what about timeouts?
+		m := <-kv.applyCh             // will block until a msg is sent
+		command, ok := m.Command.(Op) // TODO: handle ok is false
+		if ok {
+			if command.Op == "Get" && command.Key == args.Key {
+				v, keyExists := kv.store[args.Key] // TODO: lock
+				if !keyExists {
+					reply.Err = ErrNoKey
+				} else {
+					reply.Value = v
+				}
+			} else {
+				reply.Err = ErrWrongCommit
+			}
+		} else {
+			reply.Err = "Failed to typecast Command to Op"
+		}
+
+	} else {
+		reply.Err = ErrWrongLeader
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	// calling Start(), wait for applyCh, update store
+	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Op: args.Op})
+	if isLeader {
+		// TODO: wait for applyCh
+		m := <-kv.applyCh
+		command, ok := m.Command.(Op)
+		if ok {
+			if command.Op != args.Op || command.Key != args.Key {
+				reply.Err = "Commit with wrong op received"
+			} else {
+				// update store
+				DPrintf("[kfraft][%d] Received command %s, updating store", kv.me, command)
+				kv.store[args.Key] = args.Value // TODO: handle append
+			}
+		}
+	} else {
+		reply.Err = ErrWrongLeader
+	}
 }
 
 //
@@ -96,6 +144,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.store = make(map[string]string)
+
+	// TODO: start listening on channel
 
 	return kv
 }

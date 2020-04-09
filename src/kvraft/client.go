@@ -4,10 +4,10 @@ import "../labrpc"
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	leaderIdx int
 }
 
 func nrand() int64 {
@@ -21,6 +21,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	// TODO: find out the leader
+	ck.leaderIdx = int(nrand() % int64(len(servers)))
 	return ck
 }
 
@@ -39,7 +41,24 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+	args := GetArgs{Key: key}
+	reply := GetReply{}
+	// TODO: now calling a random server, update later
+	ok := ck.servers[ck.leaderIdx].Call("KVServer.Get", &args, &reply)
+	if ok {
+		i := ck.leaderIdx
+		for ok && reply.Err == ErrWrongLeader {
+			// try a different one
+			i = int(nrand() % int64(len(ck.servers)))
+			ok = ck.servers[i].Call("KVServer.Get", &args, &reply)
+		}
+		ck.leaderIdx = i
+		if reply.Err == "" {
+			return reply.Value
+		}
+	}
+
+	return reply.Value // TODO: error handling
 }
 
 //
@@ -54,6 +73,22 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	DPrintf("Got putappend request key %s, value %s, op %s", key, value, op)
+	args := PutAppendArgs{Key: key, Value: value, Op: op}
+	reply := PutAppendReply{}
+	// TODO: calling leader
+	ok := ck.servers[ck.leaderIdx].Call("KVServer.PutAppend", &args, &reply)
+	if ok {
+		i := ck.leaderIdx
+		for ok && reply.Err == ErrWrongLeader {
+			i = int(nrand() % int64(len(ck.servers)))
+			ok = ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+		}
+		ck.leaderIdx = i
+		if reply.Err == "" {
+			return
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
