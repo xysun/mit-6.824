@@ -1,15 +1,18 @@
 package kvraft
 
 import (
-	"../labgob"
-	"../labrpc"
 	"log"
-	"../raft"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"../labgob"
+	"../labrpc"
+	"../raft"
 )
 
 const Debug = 0
+const Timeout = 300
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -18,11 +21,19 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Key   string
+	Value string
+	Op    string // GET/PUT/APPEND
+	Id    string
+}
+
+type AppliedOp struct {
+	Id    string
+	Value string
 }
 
 type KVServer struct {
@@ -35,15 +46,153 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	// KV map
+	store   map[string]string
+	applied []AppliedOp
 }
 
+func (kv *KVServer) consumeCh() {
+	for {
+		m := <-kv.applyCh
+		if m.CommandValid {
+			kv.mu.Lock()
+			command := m.Command.(Op)
+
+			DPrintf("[kvraft][%d] Got commit message %+v", kv.me, m)
+			if m.CommandIndex >= len(kv.applied) {
+
+				// still possible to be duplicated!
+				duplicated := false
+				for i := 0; i < len(kv.applied); i++ {
+					if kv.applied[i].Id == command.Id {
+						DPrintf("[kvraft][%d] Found duplicate for commit %s", kv.me, command.Id)
+						duplicated = true
+						break
+					}
+				}
+
+				switch command.Op {
+				case "Put":
+					if !duplicated {
+						kv.store[command.Key] = command.Value
+					}
+
+					kv.applied = append(kv.applied, AppliedOp{Id: command.Id})
+
+				case "Append":
+					if !duplicated {
+						v, ok := kv.store[command.Key]
+						if ok {
+							kv.store[command.Key] = v + command.Value
+						} else {
+							kv.store[command.Key] = command.Value
+						}
+					}
+
+					kv.applied = append(kv.applied, AppliedOp{Id: command.Id})
+
+				case "Get":
+					v, ok := kv.store[command.Key]
+					if ok {
+						kv.applied = append(kv.applied, AppliedOp{Id: command.Id, Value: v})
+					} else {
+						kv.applied = append(kv.applied, AppliedOp{Id: command.Id, Value: ErrNoKey})
+					}
+				}
+				DPrintf("[kvraft][%d] Committed, appliedMsg len %d", kv.me, len(kv.applied))
+
+			} else {
+				if kv.applied[m.CommandIndex].Id != command.Id {
+					DPrintf("Fatal! our appliedLog has diverted")
+				} else {
+					DPrintf("[kvraft][%d] This commit %s is duplicated", kv.me, command.Id)
+				}
+			}
+			kv.mu.Unlock()
+		}
+
+	}
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	// return current `store`? or we should commit a Get first
+	idx, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get", Id: args.Id})
+	if isLeader {
+		timeout := 0
+		for timeout < Timeout {
+			// keep checking kv.applied[idx] for the uuid
+			timeout += 20
+			time.Sleep(20 * time.Millisecond) // TODO: eventual timeout
+			kv.mu.Lock()
+			if len(kv.applied) > idx {
+				if kv.applied[idx].Id == args.Id {
+					if kv.applied[idx].Value == ErrNoKey {
+						reply.Err = ErrNoKey
+					} else {
+						reply.Value = kv.applied[idx].Value
+					}
+					DPrintf("[kvraft][%d] This Get ops has been committed! %s, %s", kv.me, args.Id, reply.Value)
+					kv.mu.Unlock()
+					break
+				} else {
+					DPrintf("[kvraft][%d] Got a different id from idx %d, should be %s, got %s", kv.me, idx, args.Id, kv.applied[idx].Id)
+					reply.Err = ErrWrongCommit
+					kv.mu.Unlock()
+					break
+				}
+			} else {
+				kv.mu.Unlock()
+			}
+		}
+		if timeout >= Timeout {
+			DPrintf("[%d] Timeout for Get request %+v", kv.me, args)
+			reply.Err = "Timeout"
+		}
+
+	} else {
+		reply.Err = ErrWrongLeader
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	// calling Start(), wait for applyCh, update store
+
+	idx, term, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Op: args.Op, Id: args.Id})
+	if isLeader {
+		// TODO: leader may be lost, if see a different term on idx, then return failure
+		DPrintf("[%d] Got PutAppend request %+v, idx %d, term %d", kv.me, args, idx, term)
+		// TODO: check that we have received ApplyMsg
+		timeout := 0
+		for timeout < Timeout {
+			// keep checking kv.applied[idx] for the uuid
+			timeout += 20
+			time.Sleep(20 * time.Millisecond)
+			kv.mu.Lock()
+			if len(kv.applied) > idx {
+				if kv.applied[idx].Id == args.Id {
+					DPrintf("[kvraft][%d] This PutAppend ops has been committed! %s", kv.me, args.Id)
+					kv.mu.Unlock()
+					break
+				} else {
+					DPrintf("[kvraft][%d] Got a different id from idx %d, should be %s, got %s", kv.me, idx, args.Id, kv.applied[idx].Id)
+					reply.Err = ErrWrongCommit
+					kv.mu.Unlock()
+					break
+				}
+			} else {
+				kv.mu.Unlock()
+			}
+		}
+		if timeout >= Timeout {
+			DPrintf("[kvraft][%d] timeout in PutAppend for args %+v", kv.me, args)
+			reply.Err = "Timeout"
+		}
+
+	} else {
+		reply.Err = ErrWrongLeader
+	}
 }
 
 //
@@ -96,6 +245,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.store = make(map[string]string)
+	kv.applied = []AppliedOp{AppliedOp{Id: "", Value: "head"}}
+
+	// start listening on channel
+	go kv.consumeCh()
 
 	return kv
 }

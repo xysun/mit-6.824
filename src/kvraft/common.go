@@ -4,6 +4,7 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrWrongCommit = "ErrWrongCommit"
 )
 
 type Err string
@@ -16,6 +17,7 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Id string
 }
 
 type PutAppendReply struct {
@@ -24,10 +26,18 @@ type PutAppendReply struct {
 
 type GetArgs struct {
 	Key string
+	Id  string
 	// You'll have to add definitions here.
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
