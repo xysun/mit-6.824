@@ -118,8 +118,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// return current `store`? or we should commit a Get first
 	idx, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get", Id: args.Id})
 	if isLeader {
-		for {
+		timeout := 0
+		for timeout < 500 {
 			// keep checking kv.applied[idx] for the uuid
+			timeout += 20
 			time.Sleep(20 * time.Millisecond) // TODO: eventual timeout
 			kv.mu.Lock()
 			if len(kv.applied) > idx {
@@ -142,6 +144,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				kv.mu.Unlock()
 			}
 		}
+		if timeout >= 500 {
+			DPrintf("[%d] Timeout for Get request %+v", kv.me, args)
+			reply.Err = "Timeout"
+		}
 
 	} else {
 		reply.Err = ErrWrongLeader
@@ -157,8 +163,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		// TODO: leader may be lost, if see a different term on idx, then return failure
 		DPrintf("[%d] Got PutAppend request %+v, idx %d, term %d", kv.me, args, idx, term)
 		// TODO: check that we have received ApplyMsg
-		for {
+		timeout := 0
+		for timeout < 500 {
 			// keep checking kv.applied[idx] for the uuid
+			timeout += 20
 			time.Sleep(20 * time.Millisecond) // TODO: eventual timeout
 			kv.mu.Lock()
 			if len(kv.applied) > idx {
@@ -175,6 +183,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			} else {
 				kv.mu.Unlock()
 			}
+		}
+		if timeout >= 500 {
+			DPrintf("[kvraft][%d] timeout in PutAppend for args %+v", kv.me, args)
+			reply.Err = "Timeout"
 		}
 
 	} else {

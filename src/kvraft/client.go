@@ -97,7 +97,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 		i = int(nrand() % int64(len(ck.servers)))
 		reply = PutAppendReply{}
-		DPrintf("[client %s] Sending PutAppend %+v to server %d", ck.id, args, i)
+		// DPrintf("[client %s] Sending PutAppend %+v to server %d", ck.id, args, i)
 		ok = ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
 	}
 	ck.leaderIdx = i
