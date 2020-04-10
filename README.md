@@ -8,3 +8,4 @@ Progress:
 - [x] lab 2A
 - [x] lab 2B
 - [x] lab 2C
+- [x] lab 3A
