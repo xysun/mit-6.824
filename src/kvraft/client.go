@@ -5,12 +5,14 @@ import (
 	"math/big"
 
 	"../labrpc"
+	"github.com/google/uuid"
 )
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	leaderIdx int
+	id        string
 }
 
 func nrand() int64 {
@@ -21,11 +23,13 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
+	// NOTE: servers are randomized!
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-	// TODO: find out the leader
+	// init with a random leader
 	ck.leaderIdx = int(nrand() % int64(len(servers)))
+	ck.id = uuid.New().String()
 	return ck
 }
 
@@ -44,26 +48,26 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	DPrintf("Got Get request key %s", key)
-	args := GetArgs{Key: key}
+	DPrintf("[client %s] Got Get request key %s", ck.id, key)
+	args := GetArgs{Key: key, Id: uuid.New().String()}
 	reply := GetReply{}
-	// TODO: now calling a random server, update later
-	ok := ck.servers[ck.leaderIdx].Call("KVServer.Get", &args, &reply)
-	if ok {
-		i := ck.leaderIdx
-		for ok && reply.Err == ErrWrongLeader {
-			// try a different one
-			reply = GetReply{}
-			i = int(nrand() % int64(len(ck.servers)))
-			ok = ck.servers[i].Call("KVServer.Get", &args, &reply)
+	// now calling a random server, update later
+	i := ck.leaderIdx
+	ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
+	for !ok || reply.Err != "" {
+		if !ok {
+			DPrintf("[client %s] RPC failed for Get %+v to server %d", ck.id, args, i)
 		}
-		ck.leaderIdx = i
-		if reply.Err == "" {
-			return reply.Value
+		if reply.Err != "" && reply.Err != ErrWrongLeader {
+			DPrintf("[client %s] Get %+v to server %d has error %+v", ck.id, args, i, reply)
 		}
+		i = int(nrand() % int64(len(ck.servers)))
+		reply = GetReply{}
+		ok = ck.servers[i].Call("KVServer.Get", &args, &reply)
 	}
-
-	return reply.Value // TODO: error handling
+	ck.leaderIdx = i
+	DPrintf("[client %s] Success Get reply for args %+v from server %d is %+v, ok %t", ck.id, args, ck.leaderIdx, reply, ok)
+	return reply.Value
 }
 
 //
@@ -78,23 +82,26 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	DPrintf("Got putappend request key %s, value %s, op %s", key, value, op)
-	args := PutAppendArgs{Key: key, Value: value, Op: op}
+	DPrintf("[client %s] Got putappend request key %s, value %s, op %s", ck.id, key, value, op)
+	args := PutAppendArgs{Key: key, Value: value, Op: op, Id: uuid.New().String()}
 	reply := PutAppendReply{}
-	// TODO: calling leader
-	ok := ck.servers[ck.leaderIdx].Call("KVServer.PutAppend", &args, &reply)
-	if ok {
-		i := ck.leaderIdx
-		for ok && reply.Err == ErrWrongLeader { // TODO: stuck here
-			i = int(nrand() % int64(len(ck.servers)))
-			reply = PutAppendReply{}
-			ok = ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+	i := ck.leaderIdx
+	ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+
+	for !ok || reply.Err != "" {
+		if !ok {
+			DPrintf("[client %s] RPC failed for PutAppend %+v to server %d", ck.id, args, i)
 		}
-		ck.leaderIdx = i
-		if reply.Err == "" {
-			return
+		if reply.Err != "" && reply.Err != ErrWrongLeader {
+			DPrintf("[client %s] PutAppend %+v to server %d has error %+v", ck.id, args, i, reply)
 		}
+		i = int(nrand() % int64(len(ck.servers)))
+		reply = PutAppendReply{}
+		DPrintf("[client %s] Sending PutAppend %+v to server %d", ck.id, args, i)
+		ok = ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
 	}
+	ck.leaderIdx = i
+	DPrintf("[client %s] Success PutAppend reply for args %+v from server %d is %+v, ok %t", ck.id, args, ck.leaderIdx, reply, ok)
 }
 
 func (ck *Clerk) Put(key string, value string) {

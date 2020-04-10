@@ -6,14 +6,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
-
 	"../labgob"
 	"../labrpc"
 	"../raft"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -60,26 +58,43 @@ func (kv *KVServer) consumeCh() {
 			command := m.Command.(Op)
 
 			DPrintf("[kvraft][%d] Got commit message %+v", kv.me, m)
-			// TODO: duplicate detection
+			// duplicate detection
+			duplicated := false
+			for i := 0; i < len(kv.applied); i++ {
+				if kv.applied[i].Id == command.Id {
+					DPrintf("[kvraft][%d] This commit %s is duplicated", kv.me, command.Id)
+					duplicated = true
+					break
+				}
+			}
 			switch command.Op {
 			case "Put":
-				kv.store[command.Key] = command.Value
-				kv.applied = append(kv.applied, AppliedOp{Id: command.Id})
-			case "Append":
-				v, ok := kv.store[command.Key]
-				if ok {
-					kv.store[command.Key] = v + command.Value
-				} else {
+				if !duplicated {
 					kv.store[command.Key] = command.Value
+					kv.applied = append(kv.applied, AppliedOp{Id: command.Id})
 				}
-				kv.applied = append(kv.applied, AppliedOp{Id: command.Id})
+
+			case "Append":
+				if !duplicated {
+					v, ok := kv.store[command.Key]
+					if ok {
+						kv.store[command.Key] = v + command.Value
+					} else {
+						kv.store[command.Key] = command.Value
+					}
+					kv.applied = append(kv.applied, AppliedOp{Id: command.Id})
+				}
+
 			case "Get":
-				v, ok := kv.store[command.Key]
-				if ok {
-					kv.applied = append(kv.applied, AppliedOp{Id: command.Id, Value: v})
-				} else {
-					kv.applied = append(kv.applied, AppliedOp{Id: command.Id, Value: ErrNoKey})
+				if !duplicated {
+					v, ok := kv.store[command.Key]
+					if ok {
+						kv.applied = append(kv.applied, AppliedOp{Id: command.Id, Value: v})
+					} else {
+						kv.applied = append(kv.applied, AppliedOp{Id: command.Id, Value: ErrNoKey})
+					}
 				}
+
 			}
 			kv.mu.Unlock()
 		}
@@ -90,31 +105,27 @@ func (kv *KVServer) consumeCh() {
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	// return current `store`? or we should commit a Get first
-	id := uuid.New().String()
-	kv.mu.Lock()
-	prevLen := len(kv.applied)
-	kv.mu.Unlock()
-	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get", Id: id})
+	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get", Id: args.Id})
 	if isLeader {
 		committed := false
+		i := 0
 		for !committed {
 			time.Sleep(20 * time.Millisecond) // TODO timeout
 			kv.mu.Lock()
-			if len(kv.applied) > prevLen {
-				for i := max(prevLen-1, 0); i < len(kv.applied); i++ {
-					if kv.applied[i].Id == id {
-						committed = true
-						if kv.applied[i].Value == ErrNoKey {
-							reply.Err = ErrNoKey
-						} else {
-							reply.Value = kv.applied[i].Value
-						}
-						DPrintf("[kvraft][%d] This Get ops has been committed! %s, %s", kv.me, id, reply.Value)
-						break
+
+			for ; i < len(kv.applied); i++ {
+				if kv.applied[i].Id == args.Id {
+					committed = true
+					if kv.applied[i].Value == ErrNoKey {
+						reply.Err = ErrNoKey
+					} else {
+						reply.Value = kv.applied[i].Value
 					}
+					DPrintf("[kvraft][%d] This Get ops has been committed! %s, %s", kv.me, args.Id, reply.Value)
+					break
 				}
-				prevLen = len(kv.applied)
 			}
+
 			kv.mu.Unlock()
 		}
 
@@ -126,28 +137,25 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	// calling Start(), wait for applyCh, update store
-	id := uuid.New().String()
-	kv.mu.Lock()
-	prevLen := len(kv.applied)
-	kv.mu.Unlock()
-	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Op: args.Op, Id: id})
+
+	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Op: args.Op, Id: args.Id})
 	if isLeader {
+		DPrintf("[%d] Got PutAppend request %+v", kv.me, args)
 		// TODO: check that we have received ApplyMsg
 		committed := false
+		i := 0
 		for !committed {
 			// keep checking kv.applied for the uuid
 			time.Sleep(20 * time.Millisecond) // TODO: eventual timeout
 			kv.mu.Lock()
-			if len(kv.applied) > prevLen {
-				for i := max(prevLen-1, 0); i < len(kv.applied); i++ {
-					if kv.applied[i].Id == id {
-						committed = true
-						DPrintf("[kvraft][%d] This PutAppend ops has been committed! %s", kv.me, id)
-						break
-					}
+			for ; i < len(kv.applied); i++ {
+				if kv.applied[i].Id == args.Id {
+					committed = true
+					DPrintf("[kvraft][%d] This PutAppend ops has been committed! %s", kv.me, args.Id)
+					break
 				}
-				prevLen = len(kv.applied)
 			}
+
 			kv.mu.Unlock()
 		}
 
@@ -208,7 +216,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.store = make(map[string]string)
 
-	// TODO: start listening on channel
+	// start listening on channel
 	go kv.consumeCh()
 
 	return kv
