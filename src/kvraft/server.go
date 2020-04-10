@@ -12,6 +12,7 @@ import (
 )
 
 const Debug = 0
+const Timeout = 300
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -119,7 +120,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	idx, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get", Id: args.Id})
 	if isLeader {
 		timeout := 0
-		for timeout < 500 {
+		for timeout < Timeout {
 			// keep checking kv.applied[idx] for the uuid
 			timeout += 20
 			time.Sleep(20 * time.Millisecond) // TODO: eventual timeout
@@ -144,7 +145,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				kv.mu.Unlock()
 			}
 		}
-		if timeout >= 500 {
+		if timeout >= Timeout {
 			DPrintf("[%d] Timeout for Get request %+v", kv.me, args)
 			reply.Err = "Timeout"
 		}
@@ -164,10 +165,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		DPrintf("[%d] Got PutAppend request %+v, idx %d, term %d", kv.me, args, idx, term)
 		// TODO: check that we have received ApplyMsg
 		timeout := 0
-		for timeout < 500 {
+		for timeout < Timeout {
 			// keep checking kv.applied[idx] for the uuid
 			timeout += 20
-			time.Sleep(20 * time.Millisecond) // TODO: eventual timeout
+			time.Sleep(20 * time.Millisecond)
 			kv.mu.Lock()
 			if len(kv.applied) > idx {
 				if kv.applied[idx].Id == args.Id {
@@ -184,7 +185,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 				kv.mu.Unlock()
 			}
 		}
-		if timeout >= 500 {
+		if timeout >= Timeout {
 			DPrintf("[kvraft][%d] timeout in PutAppend for args %+v", kv.me, args)
 			reply.Err = "Timeout"
 		}
