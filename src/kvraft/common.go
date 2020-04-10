@@ -32,3 +32,10 @@ type GetReply struct {
 	Err   Err
 	Value string
 }
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

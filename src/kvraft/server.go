@@ -4,13 +4,16 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"github.com/google/uuid"
 
 	"../labgob"
 	"../labrpc"
 	"../raft"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -26,6 +29,12 @@ type Op struct {
 	Key   string
 	Value string
 	Op    string // GET/PUT/APPEND
+	Id    string
+}
+
+type AppliedOp struct {
+	Id    string
+	Value string
 }
 
 type KVServer struct {
@@ -39,32 +48,74 @@ type KVServer struct {
 
 	// Your definitions here.
 	// KV map
-	store map[string]string
+	store   map[string]string
+	applied []AppliedOp
+}
+
+func (kv *KVServer) consumeCh() {
+	for {
+		m := <-kv.applyCh
+		if m.CommandValid {
+			kv.mu.Lock()
+			command := m.Command.(Op)
+
+			DPrintf("[kvraft][%d] Got commit message %+v", kv.me, m)
+			// TODO: duplicate detection
+			switch command.Op {
+			case "Put":
+				kv.store[command.Key] = command.Value
+				kv.applied = append(kv.applied, AppliedOp{Id: command.Id})
+			case "Append":
+				v, ok := kv.store[command.Key]
+				if ok {
+					kv.store[command.Key] = v + command.Value
+				} else {
+					kv.store[command.Key] = command.Value
+				}
+				kv.applied = append(kv.applied, AppliedOp{Id: command.Id})
+			case "Get":
+				v, ok := kv.store[command.Key]
+				if ok {
+					kv.applied = append(kv.applied, AppliedOp{Id: command.Id, Value: v})
+				} else {
+					kv.applied = append(kv.applied, AppliedOp{Id: command.Id, Value: ErrNoKey})
+				}
+			}
+			kv.mu.Unlock()
+		}
+
+	}
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	// return current `store`? or we should commit a Get first
-	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get"})
+	id := uuid.New().String()
+	kv.mu.Lock()
+	prevLen := len(kv.applied)
+	kv.mu.Unlock()
+	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get", Id: id})
 	if isLeader {
-
-		// wait on applyCh; note you may not receive the msg you want?
-		// what about timeouts?
-		m := <-kv.applyCh             // will block until a msg is sent
-		command, ok := m.Command.(Op) // TODO: handle ok is false
-		if ok {
-			if command.Op == "Get" && command.Key == args.Key {
-				v, keyExists := kv.store[args.Key] // TODO: lock
-				if !keyExists {
-					reply.Err = ErrNoKey
-				} else {
-					reply.Value = v
+		committed := false
+		for !committed {
+			time.Sleep(20 * time.Millisecond) // TODO timeout
+			kv.mu.Lock()
+			if len(kv.applied) > prevLen {
+				for i := max(prevLen-1, 0); i < len(kv.applied); i++ {
+					if kv.applied[i].Id == id {
+						committed = true
+						if kv.applied[i].Value == ErrNoKey {
+							reply.Err = ErrNoKey
+						} else {
+							reply.Value = kv.applied[i].Value
+						}
+						DPrintf("[kvraft][%d] This Get ops has been committed! %s, %s", kv.me, id, reply.Value)
+						break
+					}
 				}
-			} else {
-				reply.Err = ErrWrongCommit
+				prevLen = len(kv.applied)
 			}
-		} else {
-			reply.Err = "Failed to typecast Command to Op"
+			kv.mu.Unlock()
 		}
 
 	} else {
@@ -75,20 +126,31 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	// calling Start(), wait for applyCh, update store
-	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Op: args.Op})
+	id := uuid.New().String()
+	kv.mu.Lock()
+	prevLen := len(kv.applied)
+	kv.mu.Unlock()
+	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Op: args.Op, Id: id})
 	if isLeader {
-		// TODO: wait for applyCh
-		m := <-kv.applyCh
-		command, ok := m.Command.(Op)
-		if ok {
-			if command.Op != args.Op || command.Key != args.Key {
-				reply.Err = "Commit with wrong op received"
-			} else {
-				// update store
-				DPrintf("[kfraft][%d] Received command %s, updating store", kv.me, command)
-				kv.store[args.Key] = args.Value // TODO: handle append
+		// TODO: check that we have received ApplyMsg
+		committed := false
+		for !committed {
+			// keep checking kv.applied for the uuid
+			time.Sleep(20 * time.Millisecond) // TODO: eventual timeout
+			kv.mu.Lock()
+			if len(kv.applied) > prevLen {
+				for i := max(prevLen-1, 0); i < len(kv.applied); i++ {
+					if kv.applied[i].Id == id {
+						committed = true
+						DPrintf("[kvraft][%d] This PutAppend ops has been committed! %s", kv.me, id)
+						break
+					}
+				}
+				prevLen = len(kv.applied)
 			}
+			kv.mu.Unlock()
 		}
+
 	} else {
 		reply.Err = ErrWrongLeader
 	}
@@ -147,6 +209,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.store = make(map[string]string)
 
 	// TODO: start listening on channel
+	go kv.consumeCh()
 
 	return kv
 }

@@ -1,8 +1,11 @@
 package kvraft
 
-import "../labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+
+	"../labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -41,6 +44,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	DPrintf("Got Get request key %s", key)
 	args := GetArgs{Key: key}
 	reply := GetReply{}
 	// TODO: now calling a random server, update later
@@ -49,6 +53,7 @@ func (ck *Clerk) Get(key string) string {
 		i := ck.leaderIdx
 		for ok && reply.Err == ErrWrongLeader {
 			// try a different one
+			reply = GetReply{}
 			i = int(nrand() % int64(len(ck.servers)))
 			ok = ck.servers[i].Call("KVServer.Get", &args, &reply)
 		}
@@ -80,8 +85,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ok := ck.servers[ck.leaderIdx].Call("KVServer.PutAppend", &args, &reply)
 	if ok {
 		i := ck.leaderIdx
-		for ok && reply.Err == ErrWrongLeader {
+		for ok && reply.Err == ErrWrongLeader { // TODO: stuck here
 			i = int(nrand() % int64(len(ck.servers)))
+			reply = PutAppendReply{}
 			ok = ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
 		}
 		ck.leaderIdx = i
